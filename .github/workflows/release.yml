@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    name: Build and publish GitHub Release
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select latest Xcode
+        run: |
+          sudo xcode-select -s "/Applications/Xcode.app"
+          xcodebuild -version
+
+      - name: Build (Release, unsigned)
+        run: |
+          set -e
+          xcodebuild \
+            -project ProxyMb.xcodeproj \
+            -scheme ProxyMb \
+            -configuration Release \
+            -derivedDataPath build \
+            -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+        shell: bash
+
+      - name: Package app (zip)
+        run: |
+          set -e
+          cd build/Build/Products/Release
+          ditto -c -k --sequesterRsrc --keepParent ProxyMb.app ../../../../ProxyMb-macos.zip
+        shell: bash
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ProxyMb-macos.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

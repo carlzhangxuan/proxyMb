@@ -1,0 +1,40 @@
+# Xcode and macOS
+.DS_Store
+*/.DS_Store
+
+# User settings
+xcuserdata/
+
+# Build products
+build/
+DerivedData/
+
+# Swift Package Manager
+.swiftpm/
+.build/
+
+# Xcode
+*.xccheckout
+*.moved-aside
+*.xcuserstate
+
+# Logs
+*.log
+
+# Archives and exports
+*.xcarchive
+*.ipa
+*.dSYM
+
+# Fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots
+fastlane/test_output
+
+# Bundler
+.bundle/
+
+# Carthage
+Carthage/Build/
+dist/
