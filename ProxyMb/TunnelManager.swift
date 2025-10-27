@@ -2,7 +2,7 @@ import Foundation
 import Combine
 
 class TunnelManager: ObservableObject {
-    @Published var tunnels: [TunnelConfig] = TunnelConfig.presets
+    @Published var tunnels: [TunnelConfig] = []
 
     private var processes: [UUID: Process] = [:]
 
@@ -78,7 +78,9 @@ class TunnelManager: ObservableObject {
     }
 
     init() {
-        // Detect system state on launch so indicators reflect reality
+        // Prepare default init file, then load home config if present; finally reflect system state
+        ensureInitConfigExists()
+        loadDefaultConfigIfPresent()
         refreshStatusFromSystem()
     }
 
@@ -271,6 +273,110 @@ class TunnelManager: ObservableObject {
         for i in tunnels.indices { tunnels[i].isActive = false }
         DispatchQueue.global(qos: .utility).async { [weak self] in
             self?.systemKillForPorts(allPorts)
+        }
+    }
+
+    // MARK: - Paths for config
+    private func homeDir() -> URL { FileManager.default.homeDirectoryForCurrentUser }
+    private func configDir() -> URL { homeDir().appendingPathComponent("ProxyMb", isDirectory: true) }
+    private func homeConfigURL() -> URL { configDir().appendingPathComponent("config.json") }
+    private func homeInitConfigURL() -> URL { configDir().appendingPathComponent("config_init.json") }
+
+    // Ensure ~/ProxyMb/config_init.json exists with default contents (does not affect active tunnels)
+    private func ensureInitConfigExists() {
+        let dir = configDir()
+        if !FileManager.default.fileExists(atPath: dir.path) {
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        let initURL = homeInitConfigURL()
+        guard !FileManager.default.fileExists(atPath: initURL.path) else { return }
+        // Default content: three items mirroring the previous hardcoded sample
+        let defaults: [[String: Any]] = [
+            ["endpoint": "localhost:8001", "port": 9280, "alias": "Local API"],
+            ["endpoint": "localhost:8002", "port": 40443, "alias": "Service A"],
+            ["endpoint": "localhost:8003", "port": 40453, "alias": "Service B"]
+        ]
+        do {
+            let data = try JSONSerialization.data(withJSONObject: defaults, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: initURL)
+            writeLog("Wrote default init config to \(initURL.path)")
+        } catch {
+            writeLog("Failed to write init config: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Config loading
+
+    @Published var lastConfigURL: URL? = nil
+
+    struct ExternalConfigItem: Codable {
+        let endpoint: String // remote target "host:port"
+        let port: Int        // local port
+        let alias: String    // tunnel display name
+    }
+
+    private func makeTunnels(from items: [ExternalConfigItem]) -> [TunnelConfig] {
+        items.map { it in
+            TunnelConfig(
+                name: it.alias,
+                localPorts: [it.port],
+                remoteTargets: [it.endpoint],
+                sshHost: "localhost",
+                isActive: false
+            )
+        }
+    }
+
+    private func decodeConfigItems(from data: Data) throws -> [ExternalConfigItem] {
+        try JSONDecoder().decode([ExternalConfigItem].self, from: data)
+    }
+
+    // Load a config and optionally save a copy to ~/ProxyMb/config.json when it's not the same file
+    func loadConfig(from url: URL) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            do {
+                let data = try Data(contentsOf: url)
+                let items = try self.decodeConfigItems(from: data)
+                let newTunnels = self.makeTunnels(from: items)
+
+                // If source is not the home config path, save a copy there
+                let homeURL = self.homeConfigURL()
+                if url.standardizedFileURL.path != homeURL.standardizedFileURL.path {
+                    // Ensure directory exists
+                    if !FileManager.default.fileExists(atPath: self.configDir().path) {
+                        try? FileManager.default.createDirectory(at: self.configDir(), withIntermediateDirectories: true)
+                    }
+                    do {
+                        try data.write(to: homeURL, options: .atomic)
+                        self.writeLog("Saved uploaded config to \(homeURL.path)")
+                    } catch {
+                        self.writeLog("Failed to save uploaded config to \(homeURL.path): \(error.localizedDescription)")
+                    }
+                }
+
+                self.writeLog("Loaded config from: \(url.path) (items=\(items.count))")
+                self.appendInMemory(level: .info, "Loaded config: \(items.count) items")
+                DispatchQueue.main.async {
+                    self.stopAllTunnels()
+                    self.tunnels = newTunnels
+                    self.lastConfigURL = url
+                    self.refreshStatusFromSystem()
+                }
+            } catch {
+                self.appendInMemory(level: .error, "Failed to load config from \(url.lastPathComponent): \(error.localizedDescription)")
+                self.writeLog("Failed to load config from \(url.path): \(error.localizedDescription)")
+            }
+        }
+    }
+
+    // On launch, only try ~/ProxyMb/config.json; if missing, keep tunnels empty
+    func loadDefaultConfigIfPresent() {
+        let u = homeConfigURL()
+        if FileManager.default.fileExists(atPath: u.path) {
+            loadConfig(from: u)
+        } else {
+            writeLog("No ~/ProxyMb/config.json found; starting with empty tunnel list")
         }
     }
 }

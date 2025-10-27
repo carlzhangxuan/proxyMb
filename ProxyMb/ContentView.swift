@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject var tunnelManager: TunnelManager
@@ -18,6 +19,9 @@ struct ContentView: View {
                         .font(.title3.bold())
                     Spacer()
                     HStack(spacing: 8) {
+                        Button("Load Config") { openAndLoadConfig() }
+                            .controlSize(.small)
+                            .buttonStyle(.bordered)
                         Button("Stop All") { tunnelManager.stopAllTunnels() }
                             .controlSize(.small)
                             .buttonStyle(.bordered)
@@ -40,7 +44,7 @@ struct ContentView: View {
                     logList
                 } label: {
                     HStack(spacing: 6) {
-                        Image(systemName: "ladybug.fill").foregroundStyle(.secondary)
+                        // Image(systemName: "ladybug.fill").foregroundStyle(.secondary)
                         Text("Logs").font(.subheadline.weight(.semibold))
                         Spacer()
                         Text("\(tunnelManager.logEntries.count)")
@@ -140,6 +144,19 @@ struct ContentView: View {
         case .error: return .red
         case .stdout: return .green
         case .stderr: return .orange
+        }
+    }
+
+    // MARK: - Config loader UI
+    private func openAndLoadConfig() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose a config JSON"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [UTType.json]
+        if panel.runModal() == .OK, let url = panel.url {
+            tunnelManager.loadConfig(from: url)
         }
     }
 }
