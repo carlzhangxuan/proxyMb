@@ -3,6 +3,7 @@ import AppKit
 
 struct ContentView: View {
     @EnvironmentObject var tunnelManager: TunnelManager
+    @State private var showLogs: Bool = false
 
     // Layout caps to avoid oversized windows while keeping height dynamic
     private let maxContentWidth: CGFloat = 560
@@ -32,6 +33,22 @@ struct ContentView: View {
                     contentList
                     ScrollView { contentList }
                 }
+
+                // Logs panel (collapsible, minimal impact on layout)
+                DisclosureGroup(isExpanded: $showLogs) {
+                    logToolbar
+                    logList
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "ladybug.fill").foregroundStyle(.secondary)
+                        Text("Logs").font(.subheadline.weight(.semibold))
+                        Spacer()
+                        Text("\(tunnelManager.logEntries.count)")
+                            .foregroundStyle(.secondary)
+                            .font(.caption)
+                    }
+                }
+                .tint(.secondary)
             }
             .frame(maxWidth: maxContentWidth, alignment: .leading)
             .padding(16)
@@ -48,6 +65,82 @@ struct ContentView: View {
             }
         }
         .padding(.vertical, 2)
+    }
+
+    // MARK: - Logs UI
+
+    private var logToolbar: some View {
+        HStack(spacing: 8) {
+            Button { tunnelManager.clearLogs() } label: {
+                Label("Clear", systemImage: "trash")
+            }
+            .controlSize(.small)
+            .buttonStyle(.bordered)
+
+            Button {
+                let url = tunnelManager.logFileURLForUI
+                if !FileManager.default.fileExists(atPath: url.path) {
+                    try? "".data(using: .utf8)?.write(to: url)
+                }
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            } label: {
+                Label("Open Logs", systemImage: "folder")
+            }
+            .controlSize(.small)
+            .buttonStyle(.bordered)
+
+            Spacer()
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var logList: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 6) {
+                ForEach(tunnelManager.logEntries) { entry in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(timeString(entry.timestamp))
+                            .font(.caption2).foregroundStyle(.secondary)
+                            .frame(width: 64, alignment: .leading)
+                        Text(levelTag(entry.level))
+                            .font(.system(size: 10, weight: .bold))
+                            .padding(.horizontal, 4).padding(.vertical, 1)
+                            .background(levelColor(entry.level).opacity(0.12))
+                            .foregroundStyle(levelColor(entry.level))
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                        Text(entry.message)
+                            .font(.caption)
+                            .textSelection(.enabled)
+                            .lineLimit(3)
+                    }
+                }
+            }
+            .padding(.vertical, 4)
+        }
+        .frame(maxHeight: 160)
+    }
+
+    private func timeString(_ date: Date) -> String {
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "zh_CN")
+        df.dateFormat = "HH:mm:ss"
+        return df.string(from: date)
+    }
+    private func levelTag(_ level: TunnelManager.LogLevel) -> String {
+        switch level {
+        case .info: return "INFO"
+        case .error: return "ERROR"
+        case .stdout: return "OUT"
+        case .stderr: return "ERR"
+        }
+    }
+    private func levelColor(_ level: TunnelManager.LogLevel) -> Color {
+        switch level {
+        case .info: return .blue
+        case .error: return .red
+        case .stdout: return .green
+        case .stderr: return .orange
+        }
     }
 }
 

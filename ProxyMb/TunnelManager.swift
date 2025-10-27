@@ -6,6 +6,77 @@ class TunnelManager: ObservableObject {
 
     private var processes: [UUID: Process] = [:]
 
+    // Logging (file + in-memory)
+    enum LogLevel: String { case info, error, stdout, stderr }
+    struct LogEntry: Identifiable {
+        let id = UUID()
+        let timestamp: Date
+        let level: LogLevel
+        let message: String
+    }
+    @Published var logEntries: [LogEntry] = []
+
+    private let logQueue = DispatchQueue(label: "ProxyMb.LogQueue")
+    private lazy var logFileURL: URL = {
+        let base = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first!
+        let dir = base.appendingPathComponent("Logs/ProxyMb", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: dir.path) {
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        return dir.appendingPathComponent("ProxyMb.log")
+    }()
+    var logFileURLForUI: URL { logFileURL }
+
+    private func timestamp() -> String {
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "en_US_POSIX")
+        df.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+        return df.string(from: Date())
+    }
+
+    private func appendInMemory(level: LogLevel, _ message: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.logEntries.append(LogEntry(timestamp: Date(), level: level, message: message))
+            // Optional: keep last N
+            if self.logEntries.count > 1000 { self.logEntries.removeFirst(self.logEntries.count - 1000) }
+        }
+    }
+
+    func clearLogs() {
+        DispatchQueue.main.async { self.logEntries.removeAll() }
+        // Optionally rotate file
+        logQueue.async { [url = self.logFileURL] in
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    private func writeLog(_ message: String) {
+        let line = "[\(timestamp())] \(message)\n"
+        guard let data = line.data(using: .utf8) else { return }
+        logQueue.async { [url = self.logFileURL] in
+            if FileManager.default.fileExists(atPath: url.path) {
+                do {
+                    let fh = try FileHandle(forWritingTo: url)
+                    try fh.seekToEnd()
+                    try fh.write(contentsOf: data)
+                    try fh.close()
+                } catch { /* ignore */ }
+            } else {
+                try? data.write(to: url)
+            }
+        }
+    }
+
+    private func defaultPATH() -> String {
+        // Merge common paths to find Homebrew ssh if needed
+        let current = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let extras = ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+        var parts = current.split(separator: ":").map(String.init)
+        for e in extras where !parts.contains(e) { parts.append(e) }
+        return parts.joined(separator: ":")
+    }
+
     init() {
         // Detect system state on launch so indicators reflect reality
         refreshStatusFromSystem()
@@ -17,21 +88,53 @@ class TunnelManager: ObservableObject {
         guard processes[tunnelID] == nil else { return }
 
         let task = Process()
-        task.launchPath = "/usr/bin/ssh"
+        // Use /usr/bin/env to resolve ssh via PATH
+        task.launchPath = "/usr/bin/env"
 
-        var args: [String] = ["-N", "-o", "ExitOnForwardFailure=yes"]
+        var args: [String] = ["ssh", "-N", "-o", "ExitOnForwardFailure=yes"]
         for (lp, target) in zip(config.localPorts, config.remoteTargets) {
             args.append(contentsOf: ["-L", "\(lp):\(target)"])
         }
         args.append(config.sshHost)
         task.arguments = args
 
+        // Ensure PATH contains common locations (Homebrew)
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = defaultPATH()
+        task.environment = env
+
         let outputPipe = Pipe()
         let errorPipe = Pipe()
         task.standardOutput = outputPipe
         task.standardError = errorPipe
 
-        task.terminationHandler = { [weak self] _ in
+        // Log command preview
+        let cmdPreview = args.joined(separator: " ")
+        writeLog("Launching ssh: \(cmdPreview)")
+        appendInMemory(level: .info, "Launching ssh: \(cmdPreview)")
+        writeLog("PATH=\(env["PATH"] ?? "")")
+
+        let capture: (FileHandle, LogLevel) -> Void = { [weak self] handle, level in
+            handle.readabilityHandler = { fh in
+                let data = fh.availableData
+                if data.isEmpty { return }
+                if let s = String(data: data, encoding: .utf8), !s.isEmpty {
+                    let line = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                    self?.writeLog("[\(level == .stdout ? "stdout" : "stderr")] \(line)")
+                    self?.appendInMemory(level: level, line)
+                }
+            }
+        }
+        capture(outputPipe.fileHandleForReading, .stdout)
+        capture(errorPipe.fileHandleForReading, .stderr)
+
+        task.terminationHandler = { [weak self] proc in
+            // Stop capturing
+            outputPipe.fileHandleForReading.readabilityHandler = nil
+            errorPipe.fileHandleForReading.readabilityHandler = nil
+            let status = proc.terminationStatus
+            self?.writeLog("ssh exited with status \(status)")
+            self?.appendInMemory(level: status == 0 ? .info : .error, "ssh exited with status \(status)")
             DispatchQueue.main.async {
                 self?.processes[tunnelID] = nil
                 if let idx = self?.tunnels.firstIndex(where: { $0.id == tunnelID }) {
@@ -44,8 +147,13 @@ class TunnelManager: ObservableObject {
             try task.run()
             processes[tunnelID] = task
             tunnels[index].isActive = true
+            writeLog("ssh started (pid=\(task.processIdentifier)) for tunnel=\(config.name)")
+            appendInMemory(level: .info, "ssh started (pid=\(task.processIdentifier)) for \(config.name)")
         } catch {
-            // Optionally handle error
+            let msg = "Failed to launch ssh: \(error.localizedDescription)"
+            writeLog(msg)
+            appendInMemory(level: .error, msg)
+            tunnels[index].isActive = false
         }
     }
 

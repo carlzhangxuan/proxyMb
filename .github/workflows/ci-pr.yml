@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select latest Xcode
+        shell: bash
+        run: |
+          sudo xcode-select -s "/Applications/Xcode.app"
+          xcodebuild -version
+
+      - name: Build and test app (Debug, unsigned)
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project ProxyMb.xcodeproj \
+            -scheme ProxyMb \
+            -configuration Debug \
+            -derivedDataPath build \
+            -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            build test
+
+      - name: Zip app artifact (Debug)
+        if: always()
+        shell: bash
+        run: |
+          set -e
+          APP_PATH="build/Build/Products/Debug/ProxyMb.app"
+          if [ -d "$APP_PATH" ]; then
+            ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" ProxyMb-Debug.app.zip
+          else
+            echo "App not found at $APP_PATH, skipping zip"
+          fi
+
+      - name: Build CLI (SwiftPM) and run tests
+        shell: bash
+        run: |
+          set -e
+          cd proxymb-cli
+          swift --version
+          swift build -c debug
+          swift test -c debug
+          mkdir -p ../dist
+          if [ -f .build/debug/proxymb ]; then cp .build/debug/proxymb ../dist/proxymb-debug; fi
+
+      - name: Upload CI artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-artifacts
+          path: |
+            ProxyMb-Debug.app.zip
+            dist/proxymb-debug
+          if-no-files-found: ignore
+          retention-days: 7
