@@ -77,6 +77,13 @@ class TunnelManager: ObservableObject {
         return parts.joined(separator: ":")
     }
 
+    // Fixed SOCKS proxy (hardcoded): ssh -ND 0.0.0.0:1080 tunnel
+    @Published var isSocksActive: Bool = false
+    private var socksProcess: Process?
+    private let socksPort: Int = 1080
+    private let socksBind: String = "0.0.0.0:1080"
+    private let socksHost: String = "tunnel"
+
     init() {
         // Prepare default init file, then load home config if present; finally reflect system state
         ensureInitConfigExists()
@@ -159,6 +166,77 @@ class TunnelManager: ObservableObject {
         }
     }
 
+    // Start hardcoded SOCKS proxy
+    func startSocks() {
+        guard socksProcess == nil else { return }
+        let task = Process()
+        task.launchPath = "/usr/bin/env"
+        var args: [String] = ["ssh", "-N", "-o", "ExitOnForwardFailure=yes", "-D", socksBind, socksHost]
+        task.arguments = args
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = defaultPATH()
+        task.environment = env
+
+        let out = Pipe(); let err = Pipe()
+        task.standardOutput = out; task.standardError = err
+
+        writeLog("Launching SOCKS: \(args.joined(separator: " "))")
+        appendInMemory(level: .info, "Launching SOCKS: \(args.joined(separator: " "))")
+
+        let capture: (FileHandle, LogLevel) -> Void = { [weak self] h, lvl in
+            h.readabilityHandler = { fh in
+                let data = fh.availableData
+                if data.isEmpty { return }
+                if let s = String(data: data, encoding: .utf8), !s.isEmpty {
+                    let line = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                    self?.writeLog("[SOCKS \(lvl == .stdout ? "stdout" : "stderr")] \(line)")
+                    self?.appendInMemory(level: lvl, line)
+                }
+            }
+        }
+        capture(out.fileHandleForReading, .stdout)
+        capture(err.fileHandleForReading, .stderr)
+
+        task.terminationHandler = { [weak self] p in
+            out.fileHandleForReading.readabilityHandler = nil
+            err.fileHandleForReading.readabilityHandler = nil
+            self?.writeLog("SOCKS ssh exited with status \(p.terminationStatus)")
+            DispatchQueue.main.async {
+                self?.socksProcess = nil
+                self?.isSocksActive = false
+            }
+        }
+
+        do {
+            try task.run()
+            socksProcess = task
+            isSocksActive = true
+            writeLog("SOCKS ssh started (pid=\(task.processIdentifier))")
+        } catch {
+            let msg = "Failed to launch SOCKS ssh: \(error.localizedDescription)"
+            writeLog(msg)
+            appendInMemory(level: .error, msg)
+            isSocksActive = false
+        }
+    }
+
+    func stopSocks() {
+        if let p = socksProcess {
+            p.terminate()
+            socksProcess = nil
+        }
+        isSocksActive = false
+        // System-level cleanup for port 1080
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            self?.systemKillForPorts([self?.socksPort ?? 1080])
+        }
+    }
+
+    private func refreshSocksStatus() {
+        let active = !pidsListening(onLocalPort: socksPort).isEmpty
+        DispatchQueue.main.async { self.isSocksActive = active }
+    }
+
     // MARK: - System-level helpers
 
     private func runCommand(_ path: String, _ args: [String]) -> (String, Int32) {
@@ -198,7 +276,11 @@ class TunnelManager: ObservableObject {
                 let pidStr = trimmed[..<spaceIdx]
                 let argsStr = trimmed[spaceIdx...]
                 if argsStr.contains(" ssh") || argsStr.contains("/ssh") || argsStr.contains(" sshd") {
-                    if argsStr.contains("-L \(port):") || argsStr.contains("-L\(port):") {
+                    // Match -L <port>: or -L<port>:
+                    let hasL = argsStr.contains("-L \(port):") || argsStr.contains("-L\(port):")
+                    // Match SOCKS: -D <port> or -D<port>
+                    let hasD = argsStr.contains("-D \(port)") || argsStr.contains("-D\(port)")
+                    if hasL || hasD {
                         if let pid = Int32(pidStr) { pids.insert(pid) }
                     }
                 }
@@ -242,12 +324,15 @@ class TunnelManager: ObservableObject {
                 let allPortsListening = t.localPorts.allSatisfy { !self.pidsListening(onLocalPort: $0).isEmpty }
                 statusByID[t.id] = allPortsListening
             }
+            // Also refresh fixed SOCKS state
+            let socksActive = !self.pidsListening(onLocalPort: self.socksPort).isEmpty
             DispatchQueue.main.async {
                 for i in self.tunnels.indices {
                     if let s = statusByID[self.tunnels[i].id] {
                         self.tunnels[i].isActive = s
                     }
                 }
+                self.isSocksActive = socksActive
             }
         }
     }
@@ -290,11 +375,11 @@ class TunnelManager: ObservableObject {
         }
         let initURL = homeInitConfigURL()
         guard !FileManager.default.fileExists(atPath: initURL.path) else { return }
-        // Default content: three items mirroring the previous hardcoded sample
+        // Default content: three items equivalent to the requested mapping via sshHost=tunnel
         let defaults: [[String: Any]] = [
-            ["endpoint": "localhost:8001", "port": 9280, "alias": "Local API"],
-            ["endpoint": "localhost:8002", "port": 40443, "alias": "Service A"],
-            ["endpoint": "localhost:8003", "port": 40453, "alias": "Service B"]
+            ["endpoint": "sn-coupon-server.coupon.dev.smartnews.net:80", "port": 9280,  "alias": "Coupon 9280",  "sshHost": "tunnel"],
+            ["endpoint": "sn-coupon-server.coupon.dev.smartnews.net:80", "port": 40443, "alias": "Coupon 40443", "sshHost": "tunnel"],
+            ["endpoint": "sn-coupon-server.coupon.dev.smartnews.net:80", "port": 40453, "alias": "Coupon 40453", "sshHost": "tunnel"]
         ]
         do {
             let data = try JSONSerialization.data(withJSONObject: defaults, options: [.prettyPrinted, .sortedKeys])
@@ -313,6 +398,7 @@ class TunnelManager: ObservableObject {
         let endpoint: String // remote target "host:port"
         let port: Int        // local port
         let alias: String    // tunnel display name
+        let sshHost: String? // optional ssh host alias, defaults to "tunnel"
     }
 
     private func makeTunnels(from items: [ExternalConfigItem]) -> [TunnelConfig] {
@@ -321,7 +407,7 @@ class TunnelManager: ObservableObject {
                 name: it.alias,
                 localPorts: [it.port],
                 remoteTargets: [it.endpoint],
-                sshHost: "localhost",
+                sshHost: it.sshHost ?? "tunnel",
                 isActive: false
             )
         }

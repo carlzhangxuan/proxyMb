@@ -63,6 +63,8 @@ struct ContentView: View {
     @ViewBuilder
     private var contentList: some View {
         VStack(alignment: .leading, spacing: 12) {
+            SocksCard() // fixed SOCKS proxy control
+                .frame(maxWidth: .infinity, alignment: .leading)
             ForEach(tunnelManager.tunnels) { tunnel in
                 TunnelCard(tunnel: tunnel)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -210,6 +212,52 @@ struct TunnelCard: View {
         .padding(.vertical, 12)
         .padding(.horizontal, 12)
         .padding(.trailing, 2) // avoid trailing button clipping by window chrome
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(.white.opacity(0.08), lineWidth: 1)
+        )
+    }
+}
+
+struct SocksCard: View {
+    @EnvironmentObject var tunnelManager: TunnelManager
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Circle()
+                    .fill(tunnelManager.isSocksActive ? Color.green : Color.gray)
+                    .frame(width: 8, height: 8)
+                Text("SOCKS Proxy (0.0.0.0:1080)")
+                    .font(.subheadline.weight(.semibold))
+                Spacer(minLength: 8)
+                if tunnelManager.isSocksActive {
+                    Button("Stop") { tunnelManager.stopSocks() }
+                        .controlSize(.small)
+                        .buttonStyle(.bordered)
+                } else {
+                    Button("Start") { tunnelManager.startSocks() }
+                        .controlSize(.small)
+                        .buttonStyle(.bordered)
+                }
+            }
+
+            Divider().opacity(0.12)
+            HStack(spacing: 8) {
+                Image(systemName: "network")
+                    .foregroundStyle(.secondary)
+                Text("via host: tunnel • ssh -ND 0.0.0.0:1080")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+        .padding(.vertical, 12)
+        .padding(.horizontal, 12)
+        .padding(.trailing, 2)
         .background(.ultraThinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
