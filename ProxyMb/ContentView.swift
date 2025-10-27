@@ -22,6 +22,9 @@ struct ContentView: View {
                         Button("Load Config") { openAndLoadConfig() }
                             .controlSize(.small)
                             .buttonStyle(.bordered)
+                        Button("Refresh") { tunnelManager.refreshStatusFromSystem() }
+                            .controlSize(.small)
+                            .buttonStyle(.bordered)
                         Button("Stop All") { tunnelManager.stopAllTunnels() }
                             .controlSize(.small)
                             .buttonStyle(.bordered)

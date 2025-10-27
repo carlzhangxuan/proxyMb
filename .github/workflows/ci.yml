@@ -1,13 +1,11 @@
-name: Release
+name: Manual Build (App Only)
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
 
 jobs:
-  build-and-release:
-    name: Build and publish GitHub Release
+  build-app-zip:
+    name: Build app (Release) and zip
     runs-on: macos-latest
     steps:
       - name: Checkout
@@ -38,29 +36,9 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent ProxyMb.app ../../../../ProxyMb-macos.zip
         shell: bash
 
-      - name: Build CLI (SwiftPM)
-        run: |
-          set -e
-          cd proxymb-cli
-          swift build -c release
-          mkdir -p ../dist
-          cp .build/release/proxymb ../dist/proxymb
-        shell: bash
-
-      - name: Package CLI (zip)
-        run: |
-          set -e
-          cd dist
-          chmod +x proxymb
-          /usr/bin/zip -r ../proxymb-macos.zip proxymb
-        shell: bash
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          files: |
-            ProxyMb-macos.zip
-            proxymb-macos.zip
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: ProxyMb-macos
+          path: ProxyMb-macos.zip
+          if-no-files-found: error

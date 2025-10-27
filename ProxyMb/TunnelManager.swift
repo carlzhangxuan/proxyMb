@@ -95,6 +95,13 @@ class TunnelManager: ObservableObject {
         guard let index = tunnels.firstIndex(where: { $0.id == tunnelID }) else { return }
         let config = tunnels[index]
         guard processes[tunnelID] == nil else { return }
+        // Validate mapping counts
+        guard config.localPorts.count == config.remoteTargets.count else {
+            let msg = "Config mismatch for \(config.name): localPorts(\(config.localPorts.count)) != remoteTargets(\(config.remoteTargets.count))"
+            writeLog(msg)
+            appendInMemory(level: .error, msg)
+            return
+        }
 
         let task = Process()
         // Use /usr/bin/env to resolve ssh via PATH
@@ -171,7 +178,7 @@ class TunnelManager: ObservableObject {
         guard socksProcess == nil else { return }
         let task = Process()
         task.launchPath = "/usr/bin/env"
-        var args: [String] = ["ssh", "-N", "-o", "ExitOnForwardFailure=yes", "-D", socksBind, socksHost]
+        let args: [String] = ["ssh", "-N", "-o", "ExitOnForwardFailure=yes", "-D", socksBind, socksHost]
         task.arguments = args
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = defaultPATH()
@@ -456,13 +463,19 @@ class TunnelManager: ObservableObject {
         }
     }
 
-    // On launch, only try ~/ProxyMb/config.json; if missing, keep tunnels empty
+    // On launch, try ~/ProxyMb/config.json; if missing, fall back to built-in local test preset
     func loadDefaultConfigIfPresent() {
         let u = homeConfigURL()
         if FileManager.default.fileExists(atPath: u.path) {
             loadConfig(from: u)
         } else {
-            writeLog("No ~/ProxyMb/config.json found; starting with empty tunnel list")
+            // Provide a ready-to-run local test tunnel so the app is useful out-of-the-box
+            writeLog("No ~/ProxyMb/config.json found; using built-in local test preset")
+            DispatchQueue.main.async {
+                self.stopAllTunnels()
+                self.tunnels = TunnelConfig.presets
+                self.lastConfigURL = nil
+            }
         }
     }
 }
