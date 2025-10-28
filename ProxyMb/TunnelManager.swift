@@ -88,8 +88,7 @@ class TunnelManager: ObservableObject {
     private let socksHost: String = "tunnel"
 
     init() {
-        // Prepare default init file, then load home config if present; finally reflect system state
-        ensureInitConfigExists()
+        // Load home config if present; then reflect system state and start monitor
         loadDefaultConfigIfPresent()
         refreshStatusFromSystem()
         startStatusMonitor()
@@ -400,30 +399,6 @@ class TunnelManager: ObservableObject {
     private func homeDir() -> URL { FileManager.default.homeDirectoryForCurrentUser }
     private func configDir() -> URL { homeDir().appendingPathComponent("ProxyMb", isDirectory: true) }
     private func homeConfigURL() -> URL { configDir().appendingPathComponent("config.json") }
-    private func homeInitConfigURL() -> URL { configDir().appendingPathComponent("config_init.json") }
-
-    // Ensure ~/ProxyMb/config_init.json exists with default contents (does not affect active tunnels)
-    private func ensureInitConfigExists() {
-        let dir = configDir()
-        if !FileManager.default.fileExists(atPath: dir.path) {
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        }
-        let initURL = homeInitConfigURL()
-        guard !FileManager.default.fileExists(atPath: initURL.path) else { return }
-        // Default content: three items equivalent to the requested mapping via sshHost=tunnel
-        let defaults: [[String: Any]] = [
-            ["endpoint": "sn-coupon-server.coupon.dev.smartnews.net:80", "port": 9280,  "alias": "Coupon 9280",  "sshHost": "tunnel"],
-            ["endpoint": "sn-coupon-server.coupon.dev.smartnews.net:80", "port": 40443, "alias": "Coupon 40443", "sshHost": "tunnel"],
-            ["endpoint": "sn-coupon-server.coupon.dev.smartnews.net:80", "port": 40453, "alias": "Coupon 40453", "sshHost": "tunnel"]
-        ]
-        do {
-            let data = try JSONSerialization.data(withJSONObject: defaults, options: [.prettyPrinted, .sortedKeys])
-            try data.write(to: initURL)
-            writeLog("Wrote default init config to \(initURL.path)")
-        } catch {
-            writeLog("Failed to write init config: \(error.localizedDescription)")
-        }
-    }
 
     // MARK: - Config loading
 
@@ -491,19 +466,17 @@ class TunnelManager: ObservableObject {
         }
     }
 
-    // On launch, try ~/ProxyMb/config.json; if missing, fall back to built-in local test preset
+    // On launch, try ~/ProxyMb/config.json; if missing, leave empty and log guidance
     func loadDefaultConfigIfPresent() {
         let u = homeConfigURL()
         if FileManager.default.fileExists(atPath: u.path) {
             loadConfig(from: u)
         } else {
-            // Provide a ready-to-run local test tunnel so the app is useful out-of-the-box
-            writeLog("No ~/ProxyMb/config.json found; using built-in local test preset")
+            writeLog("No ~/ProxyMb/config.json found; tunnels list is empty. Use 'Load Config' to import a JSON.")
             DispatchQueue.main.async {
                 self.stopAllTunnels()
-                self.tunnels = TunnelConfig.presets
+                self.tunnels = []
                 self.lastConfigURL = nil
-                // Ensure status reflects any externally running tunnels matching presets
                 self.refreshStatusFromSystem()
             }
         }

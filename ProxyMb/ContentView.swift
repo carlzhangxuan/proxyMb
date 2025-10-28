@@ -68,9 +68,28 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 12) {
             SocksCard() // fixed SOCKS proxy control
                 .frame(maxWidth: .infinity, alignment: .leading)
-            ForEach(tunnelManager.tunnels) { tunnel in
-                TunnelCard(tunnel: tunnel)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+
+            if tunnelManager.tunnels.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("No tunnels configured yet.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Button("Load a config JSON…") { openAndLoadConfig() }
+                        .controlSize(.small)
+                        .buttonStyle(.borderedProminent)
+                }
+                .padding(12)
+                .background(.ultraThinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(.white.opacity(0.08), lineWidth: 1)
+                )
+            } else {
+                ForEach(tunnelManager.tunnels) { tunnel in
+                    TunnelCard(tunnel: tunnel)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
         }
         .padding(.vertical, 2)

@@ -23,19 +23,6 @@ struct TunnelConfig: Identifiable {
             .joined(separator: " ")
         return "ssh \(portMappings) \(sshHost)"
     }
-    
-    static let presets: [TunnelConfig] = [
-        TunnelConfig(
-            name: "🧪 Local Test Tunnel",
-            localPorts: [9280, 40443, 40453],
-            remoteTargets: [
-                "localhost:8001",
-                "localhost:8002",
-                "localhost:8003"
-            ],
-            sshHost: "localhost"
-        )
-    ]
 }
 
 // PortStatus lives in PortStatus.swift
