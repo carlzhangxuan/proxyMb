@@ -84,3 +84,7 @@ This repo uses unsigned builds by default to keep setup simple.
 ```bash
 chmod +x scripts/build_and_package.sh
 ```
+
+## License
+
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
