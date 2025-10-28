@@ -38,3 +38,8 @@ fastlane/test_output
 # Carthage
 Carthage/Build/
 dist/
+
+# Local test scripts (contain Chinese comments) - keep local, not in repo
+/test_tunnel.sh
+/test_setup.sh
+/setup_test_env.sh

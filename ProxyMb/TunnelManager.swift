@@ -16,6 +16,9 @@ class TunnelManager: ObservableObject {
     }
     @Published var logEntries: [LogEntry] = []
 
+    // Periodic status monitor
+    private var statusTimer: DispatchSourceTimer?
+
     private let logQueue = DispatchQueue(label: "ProxyMb.LogQueue")
     private lazy var logFileURL: URL = {
         let base = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first!
@@ -89,6 +92,31 @@ class TunnelManager: ObservableObject {
         ensureInitConfigExists()
         loadDefaultConfigIfPresent()
         refreshStatusFromSystem()
+        startStatusMonitor()
+    }
+
+    deinit {
+        stopStatusMonitor()
+    }
+
+    // Start periodic monitoring to auto-detect externally-started tunnels
+    private func startStatusMonitor(interval: TimeInterval = 3.0) {
+        guard statusTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        timer.schedule(deadline: .now() + 1.0, repeating: interval, leeway: .milliseconds(200))
+        timer.setEventHandler { [weak self] in
+            self?.refreshStatusFromSystem()
+        }
+        timer.resume()
+        statusTimer = timer
+        writeLog("Started status monitor (every \(interval)s)")
+    }
+
+    private func stopStatusMonitor() {
+        statusTimer?.setEventHandler(handler: nil)
+        statusTimer?.cancel()
+        statusTimer = nil
+        writeLog("Stopped status monitor")
     }
 
     func startTunnel(for tunnelID: UUID) {
@@ -475,6 +503,8 @@ class TunnelManager: ObservableObject {
                 self.stopAllTunnels()
                 self.tunnels = TunnelConfig.presets
                 self.lastConfigURL = nil
+                // Ensure status reflects any externally running tunnels matching presets
+                self.refreshStatusFromSystem()
             }
         }
     }
