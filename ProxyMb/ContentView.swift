@@ -10,12 +10,18 @@ struct ContentView: View {
     private let maxContentWidth: CGFloat = 560
     private let maxContentHeight: CGFloat = 520
 
+    // Local selection state for grouped shortcuts
+    @State private var selectedAwsSystem: String = ""
+    @State private var selectedAwsEnv: String = ""
+    @State private var selectedK8sSystem: String = ""
+    @State private var selectedK8sEnv: String = ""
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 10) {
                 // Header (constrained width)
                 HStack(spacing: 12) {
-                    Text("SSH Tunnels")
+                    Text("Tunnels")
                         .font(.title3.bold())
                     Spacer()
                     HStack(spacing: 8) {
@@ -40,6 +46,203 @@ struct ContentView: View {
                     contentList
                     ScrollView { contentList }
                 }
+
+                // Shortcuts panel (collapsible, placed above Logs)
+                DisclosureGroup("Short Cuts") {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 10) {
+                            // AWS grouped card
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack(spacing: 10) {
+                                    Circle()
+                                        .fill((tunnelManager.groupState["aws"] ?? .idle) == .running ? Color.orange : (tunnelManager.groupState["aws"] == .success ? Color.green : (tunnelManager.groupState["aws"] == .failure ? Color.red : Color.gray)))
+                                        .frame(width: 8, height: 8)
+                                    Text("AWS")
+                                        .font(.subheadline.weight(.semibold))
+                                    Spacer(minLength: 8)
+                                    if (tunnelManager.groupState["aws"] ?? .idle) == .running {
+                                        Button("Running…") {}
+                                            .controlSize(.small)
+                                            .buttonStyle(.bordered)
+                                            .disabled(true)
+                                    } else {
+                                        Button("Run") {
+                                            guard !selectedAwsSystem.isEmpty, !selectedAwsEnv.isEmpty else { return }
+                                            tunnelManager.runGroup(kind: "aws", system: selectedAwsSystem, env: selectedAwsEnv)
+                                        }
+                                        .controlSize(.small)
+                                        .buttonStyle(.bordered)
+                                        .disabled(selectedAwsSystem.isEmpty || selectedAwsEnv.isEmpty)
+                                    }
+                                }
+
+                                Divider().opacity(0.12)
+
+                                // Single-line selectors: System + Env
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack(spacing: 12) {
+                                        //Text("System:")
+                                        //    .font(.caption2)
+                                        //    .foregroundStyle(.secondary)
+                                        if tunnelManager.awsSystems.isEmpty {
+                                            Text("No systems found")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        } else {
+                                            Picker("System", selection: $selectedAwsSystem) {
+                                                ForEach(tunnelManager.awsSystems, id: \.self) { s in
+                                                    Text(s).tag(s)
+                                                }
+                                            }
+                                            .pickerStyle(.menu)
+                                            .frame(maxWidth: 220)
+                                        }
+
+                                        //Text("Env:")
+                                        //    .font(.caption2)
+                                        //    .foregroundStyle(.secondary)
+                                        if tunnelManager.foundEnvs.isEmpty {
+                                            Text("No envs found")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        } else {
+                                            Picker("Env", selection: $selectedAwsEnv) {
+                                                ForEach(tunnelManager.foundEnvs, id: \.self) { e in
+                                                    Text(e).tag(e)
+                                                }
+                                            }
+                                            .pickerStyle(.menu)
+                                            .frame(maxWidth: 120)
+                                        }
+                                        Spacer()
+                                    }
+
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "clock")
+                                            .foregroundStyle(.secondary)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            if let d = tunnelManager.groupLastRunAt["aws"] {
+                                                Text("Last: \(d, formatter: dateFormatterSmall)")
+                                                    .font(.caption2)
+                                                    .foregroundStyle(.secondary)
+                                            } else {
+                                                Text("Never run").font(.caption2).foregroundStyle(.secondary)
+                                            }
+                                            if let code = tunnelManager.groupLastExit["aws"] {
+                                                Text("Exit: \(code)").font(.caption2).foregroundStyle(.secondary)
+                                            }
+                                        }
+                                        Spacer()
+                                    }
+                                }
+                            }
+                            .padding(10)
+                            .background(.ultraThinMaterial)
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(.white.opacity(0.06), lineWidth: 1))
+
+                            // Kubernetes grouped card
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack(spacing: 10) {
+                                    Circle()
+                                        .fill((tunnelManager.groupState["kubernetes"] ?? .idle) == .running ? Color.orange : (tunnelManager.groupState["kubernetes"] == .success ? Color.green : (tunnelManager.groupState["kubernetes"] == .failure ? Color.red : Color.gray)))
+                                        .frame(width: 8, height: 8)
+                                    Text("Kubernetes")
+                                        .font(.subheadline.weight(.semibold))
+                                    Spacer(minLength: 8)
+                                    if (tunnelManager.groupState["kubernetes"] ?? .idle) == .running {
+                                        Button("Running…") {}
+                                            .controlSize(.small)
+                                            .buttonStyle(.bordered)
+                                            .disabled(true)
+                                    } else {
+                                        Button("Run") {
+                                            guard !selectedK8sSystem.isEmpty, !selectedK8sEnv.isEmpty else { return }
+                                            tunnelManager.runGroup(kind: "kubernetes", system: selectedK8sSystem, env: selectedK8sEnv)
+                                        }
+                                        .controlSize(.small)
+                                        .buttonStyle(.bordered)
+                                        .disabled(selectedK8sSystem.isEmpty || selectedK8sEnv.isEmpty)
+                                    }
+                                }
+
+                                Divider().opacity(0.12)
+
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack(spacing: 12) {
+                                        //Text("System:")
+                                        //    .font(.caption2)
+                                        //    .foregroundStyle(.secondary)
+                                        if tunnelManager.k8sSystems.isEmpty {
+                                            Text("No systems found")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        } else {
+                                            Picker("System", selection: $selectedK8sSystem) {
+                                                ForEach(tunnelManager.k8sSystems, id: \.self) { s in
+                                                    Text(s).tag(s)
+                                                }
+                                            }
+                                            .pickerStyle(.menu)
+                                            .frame(maxWidth: 220)
+                                        }
+
+                                        //Text("Env:")
+                                        //    .font(.caption2)
+                                        //    .foregroundStyle(.secondary)
+                                        if tunnelManager.foundEnvs.isEmpty {
+                                            Text("No envs found")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        } else {
+                                            Picker("Env", selection: $selectedK8sEnv) {
+                                                ForEach(tunnelManager.foundEnvs, id: \.self) { e in
+                                                    Text(e).tag(e)
+                                                }
+                                            }
+                                            .pickerStyle(.menu)
+                                            .frame(maxWidth: 120)
+                                        }
+                                        Spacer()
+                                    }
+
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "clock")
+                                            .foregroundStyle(.secondary)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            if let d = tunnelManager.groupLastRunAt["kubernetes"] {
+                                                Text("Last: \(d, formatter: dateFormatterSmall)")
+                                                    .font(.caption2)
+                                                    .foregroundStyle(.secondary)
+                                            } else {
+                                                Text("Never run").font(.caption2).foregroundStyle(.secondary)
+                                            }
+                                            if let code = tunnelManager.groupLastExit["kubernetes"] {
+                                                Text("Exit: \(code)").font(.caption2).foregroundStyle(.secondary)
+                                            }
+                                        }
+                                        Spacer()
+                                    }
+                                }
+                            }
+                            .padding(10)
+                            .background(.ultraThinMaterial)
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(.white.opacity(0.06), lineWidth: 1))
+
+                        }
+                        .padding(.vertical, 6)
+                        .onAppear {
+                            // set sensible defaults when lists are populated
+                            if selectedAwsSystem.isEmpty, let first = tunnelManager.awsSystems.first { selectedAwsSystem = first }
+                            if selectedAwsEnv.isEmpty, let first = tunnelManager.foundEnvs.first { selectedAwsEnv = first }
+                            if selectedK8sSystem.isEmpty, let first = tunnelManager.k8sSystems.first { selectedK8sSystem = first }
+                            if selectedK8sEnv.isEmpty, let first = tunnelManager.foundEnvs.first { selectedK8sEnv = first }
+                        }
+                    }
+                    .frame(maxHeight: 260)
+                }
+                .tint(.secondary)
 
                 // Logs panel (collapsible, minimal impact on layout)
                 DisclosureGroup(isExpanded: $showLogs) {
@@ -150,6 +353,10 @@ struct ContentView: View {
             .padding(.vertical, 4)
         }
         .frame(maxHeight: 160)
+    }
+
+    private var dateFormatterSmall: DateFormatter {
+        let df = DateFormatter(); df.locale = Locale(identifier: "zh_CN"); df.dateFormat = "HH:mm"; return df
     }
 
     private func timeString(_ date: Date) -> String {

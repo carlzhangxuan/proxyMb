@@ -101,9 +101,35 @@ class TunnelManager: ObservableObject {
     @Published var spaasLastRunAt: Date? = nil
     private var spaasProcess: Process? = nil
 
+    // Shortcuts (parsed from ~/.zshrc aliases)
+    struct Shortcut: Identifiable, Equatable {
+        let id = UUID()
+        let name: String
+        let command: String
+    }
+    @Published var shortcuts: [Shortcut] = []
+    // Track per-shortcut state and last run info keyed by shortcut name
+    @Published var shortcutStates: [String: SpaasState] = [:]
+    @Published var shortcutLastExit: [String: Int] = [:]
+    @Published var shortcutLastRunAt: [String: Date] = [:]
+    private var shortcutProcesses: [String: Process] = [:]
+
+    // Structured shortcut groups (derived from aliases) - provide UI-friendly options
+    @Published var awsSystems: [String] = []            // unique --system values for aws
+    @Published var k8sSystems: [String] = []            // unique -s values for kubernetes
+    @Published var foundEnvs: [String] = []             // unique env values (prd/dev etc)
+    @Published var k8sContextBySystem: [String: String] = [:] // optional -C value per k8s system
+
+    // Track running state for group-run operations (keys like "aws" and "kubernetes")
+    @Published var groupState: [String: SpaasState] = ["aws": .idle, "kubernetes": .idle]
+    @Published var groupLastExit: [String: Int] = [:]
+    @Published var groupLastRunAt: [String: Date] = [:]
+    private var groupProcesses: [String: Process] = [:]
+
     init() {
         // Load home config if present; then reflect system state and start monitor
         loadDefaultConfigIfPresent()
+        loadShortcuts()
         refreshStatusFromSystem()
         startStatusMonitor()
     }
@@ -452,6 +478,203 @@ class TunnelManager: ObservableObject {
                     self.spaasLastExitStatus = -1
                     self.spaasProcess = nil
                     self.spaasState = .failure
+                }
+            }
+        }
+    }
+
+    // MARK: - Shortcuts: load aliases from ~/.zshrc and run them
+    func loadShortcuts() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self else { return }
+            let zshURL = self.homeDir().appendingPathComponent(".zshrc")
+            var results: [Shortcut] = []
+            if FileManager.default.fileExists(atPath: zshURL.path) {
+                if let content = try? String(contentsOf: zshURL, encoding: .utf8) {
+                    // Parse lines like: alias ll='ls -la'  or alias gs="git status"
+                    let pattern = "^\\s*alias\\s+([A-Za-z0-9_+-]+)=['\"](.*?)['\"]\\s*$"
+                    if let re = try? NSRegularExpression(pattern: pattern, options: [.anchorsMatchLines]) {
+                        let ns = content as NSString
+                        let matches = re.matches(in: content, options: [], range: NSRange(location: 0, length: ns.length))
+                        for m in matches {
+                            if m.numberOfRanges >= 3 {
+                                let name = ns.substring(with: m.range(at: 1))
+                                let cmd = ns.substring(with: m.range(at: 2))
+                                results.append(Shortcut(name: name, command: cmd))
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Build structured groups from parsed shortcuts
+            var awsSet = Set<String>()
+            var k8sSet = Set<String>()
+            var envSet = Set<String>()
+            var k8sContextMap: [String: String] = [:]
+
+            for sc in results {
+                let cmd = sc.command
+                // Normalize spacing to make regex simpler
+                _ = cmd.replacingOccurrences(of: "=", with: " = ")
+
+                if cmd.contains("spaas aws") {
+                    // extract --system <value> and --env <value>
+                    if let sys = firstMatch(in: cmd, pattern: "--system\\s+([\\S]+)") {
+                        let s = sanitizeToken(sys)
+                        awsSet.insert(s)
+                    }
+                    if let e = firstMatch(in: cmd, pattern: "--env\\s+([\\S]+)") {
+                        let ev = sanitizeToken(e)
+                        envSet.insert(ev)
+                    }
+                } else if cmd.contains("spaas kubernetes") || cmd.contains("spaas k8s") {
+                    // extract -s <value>, -C <context>, and -A <env>
+                    if let sys = firstMatch(in: cmd, pattern: "-s\\s+([\\S]+)") {
+                        let s = sanitizeToken(sys)
+                        k8sSet.insert(s)
+                        if let ctx = firstMatch(in: cmd, pattern: "-C\\s+([\\S]+)") {
+                            let c = sanitizeToken(ctx)
+                            k8sContextMap[s] = c
+                        }
+                    }
+                    if let e = firstMatch(in: cmd, pattern: "-A\\s+([\\S]+)") {
+                        let ev = sanitizeToken(e)
+                        envSet.insert(ev)
+                    }
+                }
+            }
+
+            let awsList = Array(awsSet).sorted()
+            let k8sList = Array(k8sSet).sorted()
+            let envList = Array(envSet).sorted()
+
+            // Emit more detailed detection info to logs for visibility
+            self.writeLog("Detected aws systems: \(awsList.joined(separator: ", "))")
+            self.writeLog("Detected k8s systems: \(k8sList.joined(separator: ", "))")
+            self.writeLog("Detected envs: \(envList.joined(separator: ", "))")
+
+            DispatchQueue.main.async {
+                 self.shortcuts = results
+                 // initialize states
+                 for s in results {
+                     if self.shortcutStates[s.name] == nil {
+                         self.shortcutStates[s.name] = .idle
+                     }
+                 }
+
+                 // publish structured groups
+                 self.awsSystems = awsList
+                 self.k8sSystems = k8sList
+                 self.foundEnvs = envList
+                 self.k8sContextBySystem = k8sContextMap
+
+                 // ensure group state entries exist
+                 if self.groupState["aws"] == nil { self.groupState["aws"] = .idle }
+                 if self.groupState["kubernetes"] == nil { self.groupState["kubernetes"] = .idle }
+             }
+
+            self.writeLog("Loaded shortcuts: \(results.count) from \(zshURL.path)")
+        }
+    }
+
+    // Helper: return first capture group match
+    private func firstMatch(in text: String, pattern: String) -> String? {
+        if let re = try? NSRegularExpression(pattern: pattern, options: []) {
+            let ns = text as NSString
+            if let m = re.firstMatch(in: text, options: [], range: NSRange(location: 0, length: ns.length)) {
+                if m.numberOfRanges >= 2 {
+                    return ns.substring(with: m.range(at: 1))
+                }
+            }
+        }
+        return nil
+    }
+
+    // Helper: sanitize tokens extracted from alias commands (strip quotes/parentheses)
+    private func sanitizeToken(_ s: String) -> String {
+        var t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimSet = CharacterSet(charactersIn: "\"'()")
+        t = t.trimmingCharacters(in: trimSet)
+        return t
+    }
+
+    // Run a grouped shortcut (aws or kubernetes) by composing a command from chosen parameters
+    func runGroup(kind: String, system: String, env: String) {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self else { return }
+            let key = kind // "aws" or "kubernetes"
+            // prevent multiple parallel runs for the same group
+            if self.groupProcesses[key] != nil { return }
+
+            let task = Process()
+            task.launchPath = "/usr/bin/env"
+            var args: [String] = ["spaas"]
+            if key == "aws" {
+                args.append(contentsOf: ["aws", "configure", "--system", system, "--env", env])
+            } else {
+                // assume kubernetes
+                args.append(contentsOf: ["kubernetes", "configure", "-s", system])
+                if let ctx = self.k8sContextBySystem[system] { args.append(contentsOf: ["-C", ctx]) }
+                args.append(contentsOf: ["-A", env])
+            }
+            task.arguments = args
+
+            var envVars = ProcessInfo.processInfo.environment
+            envVars["PATH"] = self.defaultPATH()
+            task.environment = envVars
+
+            let out = Pipe(); let err = Pipe()
+            task.standardOutput = out; task.standardError = err
+
+            DispatchQueue.main.async {
+                self.groupState[key] = .running
+                self.groupLastRunAt[key] = Date()
+            }
+
+            let preview = args.joined(separator: " ")
+            self.writeLog("Launching group: /usr/bin/env \(preview)")
+            self.appendInMemory(level: .info, "Launching group: \(key) system=\(system) env=\(env)")
+
+            let capture: (FileHandle, LogLevel) -> Void = { [weak self] fh, lvl in
+                fh.readabilityHandler = { handle in
+                    let data = handle.availableData
+                    guard !data.isEmpty else { return }
+                    if let s = String(data: data, encoding: .utf8), !s.isEmpty {
+                        let line = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                        self?.writeLog("[group \(key) \(lvl == .stdout ? "stdout" : "stderr")] \(line)")
+                        self?.appendInMemory(level: lvl, line)
+                    }
+                }
+            }
+            capture(out.fileHandleForReading, .stdout)
+            capture(err.fileHandleForReading, .stderr)
+
+            task.terminationHandler = { [weak self] p in
+                guard let self = self else { return }
+                out.fileHandleForReading.readabilityHandler = nil
+                err.fileHandleForReading.readabilityHandler = nil
+                let status = p.terminationStatus
+                self.writeLog("group \(key) exited with status \(status)")
+                self.appendInMemory(level: status == 0 ? .info : .error, "group \(key) exited with status \(status)")
+                DispatchQueue.main.async {
+                    self.groupLastExit[key] = Int(status)
+                    self.groupProcesses[key] = nil
+                    self.groupState[key] = (status == 0) ? .success : .failure
+                }
+            }
+
+            do {
+                try task.run()
+                self.groupProcesses[key] = task
+            } catch {
+                let msg = "Failed to launch group \(key): \(error.localizedDescription)"
+                self.writeLog(msg)
+                self.appendInMemory(level: .error, msg)
+                DispatchQueue.main.async {
+                    self.groupLastExit[key] = -1
+                    self.groupProcesses[key] = nil
+                    self.groupState[key] = .failure
                 }
             }
         }
