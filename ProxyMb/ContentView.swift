@@ -66,6 +66,10 @@ struct ContentView: View {
     @ViewBuilder
     private var contentList: some View {
         VStack(alignment: .leading, spacing: 12) {
+            // SPAAS login control occupies the top row
+            SpaasLoginCard()
+                .frame(maxWidth: .infinity, alignment: .leading)
+
             SocksCard() // fixed SOCKS proxy control
                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -159,7 +163,7 @@ struct ContentView: View {
         case .info: return "INFO"
         case .error: return "ERROR"
         case .stdout: return "OUT"
-        case .stderr: return "ERR"
+        case .stderr: return "WRN"
         }
     }
     private func levelColor(_ level: TunnelManager.LogLevel) -> Color {
@@ -286,6 +290,90 @@ struct SocksCard: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(.white.opacity(0.08), lineWidth: 1)
         )
+    }
+}
+
+// Minimal SPAAS login card similar in style to TunnelCard/SocksCard
+struct SpaasLoginCard: View {
+    @EnvironmentObject var tunnelManager: TunnelManager
+
+    private func stateColor() -> Color {
+        switch tunnelManager.spaasState {
+        case .idle: return Color.gray
+        case .running: return Color.orange
+        case .success: return Color.green
+        case .failure: return Color.red
+        }
+    }
+
+    private func stateText() -> String {
+        switch tunnelManager.spaasState {
+        case .idle: return "Idle"
+        case .running: return "Running"
+        case .success: return "Last run success"
+        case .failure: return "Last run failed"
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Circle()
+                    .fill(stateColor())
+                    .frame(width: 8, height: 8)
+                Text("spaas login")
+                    .font(.subheadline.weight(.semibold))
+                Spacer(minLength: 8)
+                if tunnelManager.spaasState == .running {
+                    Button("Running…") {}
+                        .controlSize(.small)
+                        .buttonStyle(.bordered)
+                        .disabled(true)
+                } else {
+                    Button("Run") { tunnelManager.spaasLogin() }
+                        .controlSize(.small)
+                        .buttonStyle(.bordered)
+                }
+            }
+
+            Divider().opacity(0.12)
+
+            HStack(spacing: 8) {
+                Image(systemName: "clock")
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(stateText())
+                        .font(.caption)
+                    if let date = tunnelManager.spaasLastRunAt {
+                        Text("Last: \(dateFormatter.string(from: date))")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Never run")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let code = tunnelManager.spaasLastExitStatus {
+                        Text("Exit: \(code)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 12)
+        .padding(.horizontal, 12)
+        .padding(.trailing, 2)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(.white.opacity(0.08), lineWidth: 1)
+        )
+    }
+
+    private var dateFormatter: DateFormatter {
+        let df = DateFormatter(); df.locale = Locale(identifier: "zh_CN"); df.dateFormat = "yyyy-MM-dd HH:mm:ss"; return df
     }
 }
 

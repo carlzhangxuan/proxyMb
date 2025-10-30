@@ -43,6 +43,13 @@ class TunnelManager: ObservableObject {
             self.logEntries.append(LogEntry(timestamp: Date(), level: level, message: message))
             // Optional: keep last N
             if self.logEntries.count > 1000 { self.logEntries.removeFirst(self.logEntries.count - 1000) }
+
+            // Monitor for spaas login success message in logs: if we see "spaas login exited with status 0"
+            if message.contains("spaas login exited with status 0") {
+                self.spaasLastExitStatus = 0
+                self.spaasLastRunAt = Date()
+                self.spaasState = .success
+            }
         }
     }
 
@@ -86,6 +93,13 @@ class TunnelManager: ObservableObject {
     private let socksPort: Int = 1080
     private let socksBind: String = "0.0.0.0:1080"
     private let socksHost: String = "tunnel"
+
+    // SPAAS login monitoring
+    enum SpaasState: Int { case idle = 0, running, success, failure }
+    @Published var spaasState: SpaasState = .idle
+    @Published var spaasLastExitStatus: Int? = nil
+    @Published var spaasLastRunAt: Date? = nil
+    private var spaasProcess: Process? = nil
 
     init() {
         // Load home config if present; then reflect system state and start monitor
@@ -367,6 +381,78 @@ class TunnelManager: ObservableObject {
                     }
                 }
                 self.isSocksActive = socksActive
+            }
+        }
+    }
+
+    // Public helper to run `spaas login` and capture output into logs
+    func spaasLogin() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self else { return }
+            let task = Process()
+            task.launchPath = "/usr/bin/env"
+            task.arguments = ["spaas", "login"]
+
+            var env = ProcessInfo.processInfo.environment
+            env["PATH"] = self.defaultPATH()
+            task.environment = env
+
+            let outPipe = Pipe()
+            let errPipe = Pipe()
+            task.standardOutput = outPipe
+            task.standardError = errPipe
+
+            // mark running
+            DispatchQueue.main.async {
+                self.spaasState = .running
+                self.spaasLastRunAt = Date()
+            }
+            self.spaasProcess = task
+
+            let preview = (task.arguments ?? []).joined(separator: " ")
+            self.writeLog("Launching: /usr/bin/env \(preview)")
+            self.appendInMemory(level: .info, "Launching: spaas login")
+
+            let capture: (FileHandle, LogLevel) -> Void = { [weak self] fh, lvl in
+                fh.readabilityHandler = { handle in
+                    let data = handle.availableData
+                    guard !data.isEmpty else { return }
+                    if let s = String(data: data, encoding: .utf8), !s.isEmpty {
+                        let line = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                        self?.writeLog("[spaas \(lvl == .stdout ? "stdout" : "stderr")] \(line)")
+                        self?.appendInMemory(level: lvl, line)
+                    }
+                }
+            }
+            capture(outPipe.fileHandleForReading, .stdout)
+            capture(errPipe.fileHandleForReading, .stderr)
+
+            task.terminationHandler = { [weak self] proc in
+                guard let self = self else { return }
+                outPipe.fileHandleForReading.readabilityHandler = nil
+                errPipe.fileHandleForReading.readabilityHandler = nil
+                let status = proc.terminationStatus
+                self.writeLog("spaas login exited with status \(status)")
+                self.appendInMemory(level: status == 0 ? .info : .error, "spaas login exited with status \(status)")
+
+                DispatchQueue.main.async {
+                    self.spaasLastExitStatus = Int(status)
+                    self.spaasProcess = nil
+                    self.spaasState = (status == 0) ? .success : .failure
+                }
+            }
+
+            do {
+                try task.run()
+            } catch {
+                let msg = "Failed to launch spaas login: \(error.localizedDescription)"
+                self.writeLog(msg)
+                self.appendInMemory(level: .error, msg)
+                DispatchQueue.main.async {
+                    self.spaasLastExitStatus = -1
+                    self.spaasProcess = nil
+                    self.spaasState = .failure
+                }
             }
         }
     }
