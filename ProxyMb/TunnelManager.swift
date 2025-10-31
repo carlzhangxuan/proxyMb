@@ -415,6 +415,17 @@ class TunnelManager: ObservableObject {
     func spaasLogin() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self = self else { return }
+
+            // Allow repeat runs: if a previous process exists but is not running, clear it; if running, ignore.
+            if let p = self.spaasProcess {
+                if p.isRunning {
+                    self.appendInMemory(level: .info, "spaas login requested but already running")
+                    return
+                } else {
+                    self.spaasProcess = nil
+                }
+            }
+
             let task = Process()
             task.launchPath = "/usr/bin/env"
             task.arguments = ["spaas", "login"]
@@ -604,8 +615,16 @@ class TunnelManager: ObservableObject {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self = self else { return }
             let key = kind // "aws" or "kubernetes"
-            // prevent multiple parallel runs for the same group
-            if self.groupProcesses[key] != nil { return }
+
+            // Allow repeat runs: only block if an existing process is actually running.
+            if let existing = self.groupProcesses[key] {
+                if existing.isRunning {
+                    self.appendInMemory(level: .info, "group \(key) run requested but already running")
+                    return
+                } else {
+                    self.groupProcesses[key] = nil
+                }
+            }
 
             let task = Process()
             task.launchPath = "/usr/bin/env"
