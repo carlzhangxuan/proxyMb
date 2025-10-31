@@ -28,7 +28,12 @@ struct ContentView: View {
                         Button("Load Config") { openAndLoadConfig() }
                             .controlSize(.small)
                             .buttonStyle(.bordered)
-                        Button("Refresh") { tunnelManager.refreshStatusFromSystem() }
+                        Button("Refresh") {
+                            // Reset local UI selections so they repopulate after reload
+                            selectedAwsSystem = ""; selectedAwsEnv = ""
+                            selectedK8sSystem = ""; selectedK8sEnv = ""
+                            tunnelManager.refreshAll()
+                        }
                             .controlSize(.small)
                             .buttonStyle(.bordered)
                         Button("Stop All") { tunnelManager.stopAllTunnels() }
@@ -238,6 +243,21 @@ struct ContentView: View {
                             if selectedAwsEnv.isEmpty, let first = tunnelManager.foundEnvs.first { selectedAwsEnv = first }
                             if selectedK8sSystem.isEmpty, let first = tunnelManager.k8sSystems.first { selectedK8sSystem = first }
                             if selectedK8sEnv.isEmpty, let first = tunnelManager.foundEnvs.first { selectedK8sEnv = first }
+                        }
+                        // When lists update after refresh, ensure selection is valid or set to first
+                        .onChange(of: tunnelManager.awsSystems) { old, new in
+                            if selectedAwsSystem.isEmpty || !new.contains(selectedAwsSystem) {
+                                selectedAwsSystem = new.first ?? ""
+                            }
+                        }
+                        .onChange(of: tunnelManager.k8sSystems) { old, new in
+                            if selectedK8sSystem.isEmpty || !new.contains(selectedK8sSystem) {
+                                selectedK8sSystem = new.first ?? ""
+                            }
+                        }
+                        .onChange(of: tunnelManager.foundEnvs) { old, new in
+                            if selectedAwsEnv.isEmpty || !new.contains(selectedAwsEnv) { selectedAwsEnv = new.first ?? "" }
+                            if selectedK8sEnv.isEmpty || !new.contains(selectedK8sEnv) { selectedK8sEnv = new.first ?? "" }
                         }
                     }
                     .frame(maxHeight: 260)

@@ -158,6 +158,64 @@ class TunnelManager: ObservableObject {
         writeLog("Stopped status monitor")
     }
 
+    // Reset runtime state similar to app restart and reload config/shortcuts
+    func refreshAll() {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            self.writeLog("Refreshing all state (soft restart)…")
+
+            // Collect PIDs to terminate (handles stuck processes robustly)
+            var pidsToKill = Set<Int32>()
+            if let p = self.spaasProcess, p.isRunning { pidsToKill.insert(p.processIdentifier) }
+            for (_, p) in self.groupProcesses where p.isRunning { pidsToKill.insert(p.processIdentifier) }
+
+            // Ask current Process objects to terminate (polite), then enforce with kill
+            if let p = self.spaasProcess, p.isRunning { p.terminate() }
+            for (_, p) in self.groupProcesses where p.isRunning { p.terminate() }
+            if !pidsToKill.isEmpty { self.terminate(pids: pidsToKill, timeout: 0.8) }
+
+            // Clear references
+            self.spaasProcess = nil
+            self.groupProcesses.removeAll()
+
+            // Stop SOCKS and tunnels
+            self.stopSocks()
+            self.stopAllTunnels()
+
+            // Reset published states and in-memory logs (do not delete log file)
+            DispatchQueue.main.async {
+                self.isSocksActive = false
+                self.spaasState = .idle
+                self.spaasLastExitStatus = nil
+                self.spaasLastRunAt = nil
+
+                self.groupState["aws"] = .idle
+                self.groupState["kubernetes"] = .idle
+                self.groupLastExit.removeAll()
+                self.groupLastRunAt.removeAll()
+
+                self.shortcuts.removeAll()
+                self.awsSystems.removeAll()
+                self.k8sSystems.removeAll()
+                self.foundEnvs.removeAll()
+                self.k8sContextBySystem.removeAll()
+
+                self.shortcutStates.removeAll()
+                self.shortcutLastExit.removeAll()
+                self.shortcutLastRunAt.removeAll()
+
+                self.logEntries.removeAll()
+                self.lastConfigURL = nil
+            }
+
+            // Reload from disk
+            self.loadDefaultConfigIfPresent()
+            self.loadShortcuts()
+            self.refreshStatusFromSystem()
+            self.writeLog("Refresh complete")
+        }
+    }
+
     func startTunnel(for tunnelID: UUID) {
         guard let index = tunnels.firstIndex(where: { $0.id == tunnelID }) else { return }
         let config = tunnels[index]
