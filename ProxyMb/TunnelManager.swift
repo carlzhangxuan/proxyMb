@@ -28,7 +28,7 @@ class TunnelManager: ObservableObject {
         let base = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first!
         let dir = base.appendingPathComponent("Logs/ProxyMb", isDirectory: true)
         if !FileManager.default.fileExists(atPath: dir.path) {
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: nil)
         }
         return dir.appendingPathComponent("ProxyMb.log")
     }()
@@ -65,9 +65,15 @@ class TunnelManager: ObservableObject {
             if FileManager.default.fileExists(atPath: url.path) {
                 do {
                     let fh = try FileHandle(forWritingTo: url)
-                    _ = try? fh.seekToEnd()
-                    fh.write(data)
-                    try fh.close()
+                    if #available(macOS 13.0, *) {
+                        _ = try? fh.seekToEnd()
+                        fh.write(data)
+                        try? fh.close()
+                    } else {
+                        fh.seekToEndOfFile()
+                        fh.write(data)
+                        fh.closeFile()
+                    }
                 } catch { /* ignore */ }
             } else {
                 try? data.write(to: url)
@@ -102,7 +108,7 @@ class TunnelManager: ObservableObject {
         let link = dir.appendingPathComponent("spaas")
         do {
             if !FileManager.default.fileExists(atPath: dir.path) {
-                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: nil)
                 writeLog("Created directory: \(dir.path)")
             }
             guard let exeURL = exeURL else { return false }
@@ -216,7 +222,7 @@ class TunnelManager: ObservableObject {
         // Make it discoverable for shells: ~/.local/bin/spaas → selected path
         let ok = ensureSpaasSymlink(target: url)
         if !ok {
-            appendInMemory(level: .stderr, "Tip: add to your shell rc, e.g., export PATH=\"$HOME/.local/bin:$PATH\"")
+            appendInMemory(level: .stderr, "Tip: add to your shell rc, e.g., export PATH=$HOME/.local/bin:$PATH")
         }
     }
 
@@ -259,7 +265,8 @@ class TunnelManager: ObservableObject {
                 if data.isEmpty { return }
                 if let s = String(data: data, encoding: .utf8), !s.isEmpty {
                     let line = s.trimmingCharacters(in: .whitespacesAndNewlines)
-                    self?.writeLog("[spaas \(lvl == .stdout ? \"stdout\" : \"stderr\")] \(line)")
+                    let stream = (lvl == .stdout ? "stdout" : "stderr")
+                    self?.writeLog("[spaas \(stream)] \(line)")
                     self?.appendInMemory(level: lvl, line)
                 }
             }
@@ -441,7 +448,8 @@ class TunnelManager: ObservableObject {
                 if data.isEmpty { return }
                 if let s = String(data: data, encoding: .utf8), !s.isEmpty {
                     let line = s.trimmingCharacters(in: .whitespacesAndNewlines)
-                    self?.writeLog("[\(level == .stdout ? \"stdout\" : \"stderr\")] \(line)")
+                    let tag = (level == .stdout ? "stdout" : "stderr")
+                    self?.writeLog("[\(tag)] \(line)")
                     self?.appendInMemory(level: level, line)
                 }
             }
@@ -552,7 +560,8 @@ class TunnelManager: ObservableObject {
                 if data.isEmpty { return }
                 if let s = String(data: data, encoding: .utf8), !s.isEmpty {
                     let line = s.trimmingCharacters(in: .whitespacesAndNewlines)
-                    self?.writeLog("[SOCKS \(lvl == .stdout ? \"stdout\" : \"stderr\")] \(line)")
+                    let stream = (lvl == .stdout ? "stdout" : "stderr")
+                    self?.writeLog("[SOCKS \(stream)] \(line)")
                     self?.appendInMemory(level: lvl, line)
                 }
             }
@@ -630,8 +639,8 @@ class TunnelManager: ObservableObject {
             var lastPid: Int32? = nil
             var lastCmd: String = ""
             for line in out.split(separator: "\n") {
-                if line.first == "p", let v = Int32(line.dropFirst()) { lastPid = v }
-                else if line.first == "c" { lastCmd = String(line.dropFirst()) }
+                if line.hasPrefix("p"), let v = Int32(String(line.dropFirst())) { lastPid = v }
+                else if line.hasPrefix("c") { lastCmd = String(line.dropFirst()) }
                 if let pid = lastPid, !lastCmd.isEmpty {
                     if lastCmd.contains("ssh") { pids.insert(pid) }
                     lastPid = nil; lastCmd = ""
@@ -644,14 +653,14 @@ class TunnelManager: ObservableObject {
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
                 guard let spaceIdx = trimmed.firstIndex(of: " ") else { continue }
                 let pidStr = trimmed[..<spaceIdx]
-                let argsStr = trimmed[spaceIdx...]
+                let argsStr = String(trimmed[spaceIdx...])
                 if argsStr.contains(" ssh") || argsStr.contains("/ssh") || argsStr.contains(" sshd") {
                     // Match -L <port>: or -L<port>:
                     let hasL = argsStr.contains("-L \(port):") || argsStr.contains("-L\(port):")
                     // Match SOCKS: -D <port> or -D<port>
                     let hasD = argsStr.contains("-D \(port)") || argsStr.contains("-D\(port)")
                     if hasL || hasD {
-                        if let pid = Int32(pidStr) { pids.insert(pid) }
+                        if let pid = Int32(String(pidStr)) { pids.insert(pid) }
                     }
                 }
             }
@@ -834,7 +843,7 @@ class TunnelManager: ObservableObject {
                 let homeURL = self.homeConfigURL()
                 if url.standardizedFileURL.path != homeURL.standardizedFileURL.path {
                     if !FileManager.default.fileExists(atPath: self.configDir().path) {
-                        try? FileManager.default.createDirectory(at: self.configDir(), withIntermediateDirectories: true)
+                        try? FileManager.default.createDirectory(at: self.configDir(), withIntermediateDirectories: true, attributes: nil)
                     }
                     do {
                         try data.write(to: homeURL, options: .atomic)

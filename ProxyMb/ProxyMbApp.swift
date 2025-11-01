@@ -6,16 +6,24 @@
 //
 
 import SwiftUI
+import AppKit
+
+class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
+    }
+}
 
 @main
 struct ProxyMbApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var tunnelManager = TunnelManager()
 
     var body: some Scene {
-        MenuBarExtra("SSH", systemImage: "terminal.fill") {
+        MenuBarExtra("ProxyMb", systemImage: "network") {
             ContentView()
                 .environmentObject(tunnelManager)
-                .frame(minWidth: 500)
+                .frame(width: 560)
         }
         .menuBarExtraStyle(.window)
     }

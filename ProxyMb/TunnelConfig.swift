@@ -19,7 +19,7 @@ struct TunnelConfig: Identifiable {
     // Generate complete SSH command
     var sshCommand: String {
         let portMappings = zip(localPorts, remoteTargets)
-            .map { "-L \($0):\($1)" }
+            .map { local, remote in "-L \(local):\(remote)" }
             .joined(separator: " ")
         return "ssh \(portMappings) \(sshHost)"
     }

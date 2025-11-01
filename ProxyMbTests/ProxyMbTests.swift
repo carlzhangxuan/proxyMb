@@ -5,12 +5,11 @@
 //  Created by zx on 2025/10/21.
 //
 
-import Testing
+import XCTest
 
-struct ProxyMbTests {
-
-    @Test func example() async throws {
-        // Write your test here and use APIs like `#expect(...)` to check expected conditions.
+final class ProxyMbTests: XCTestCase {
+    func testExample() {
+        // Write your test here and use APIs like `XCTAssert...` to check expected conditions.
+        XCTAssertTrue(true)
     }
-
 }
