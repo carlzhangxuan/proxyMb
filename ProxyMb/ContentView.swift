@@ -8,13 +8,18 @@ struct ContentView: View {
 
     // Layout caps to avoid oversized windows while keeping height dynamic
     private let maxContentWidth: CGFloat = 560
-    // Removed maxContentHeight to let outer ScrollView manage height
 
     // Local selection state for grouped shortcuts
     @State private var selectedAwsSystem: String = ""
     @State private var selectedAwsEnv: String = ""
     @State private var selectedK8sSystem: String = ""
     @State private var selectedK8sEnv: String = ""
+
+    // Importers
+    @State private var showConfigImporter: Bool = false
+
+    // Guard to avoid opening multiple panels at once
+    @State private var isPresentingConfigPanel: Bool = false
 
     // Extracted sections to reduce type-checker load in Release builds
     @ViewBuilder private var headerBar: some View {
@@ -23,9 +28,6 @@ struct ContentView: View {
                 .font(.title3.bold())
             Spacer()
             HStack(spacing: 8) {
-                Button("Load Config") { openAndLoadConfig() }
-                    .controlSize(.small)
-                    .buttonStyle(.bordered)
                 Button("Refresh") {
                     // Reset local UI selections so they repopulate after reload
                     selectedAwsSystem = ""; selectedAwsEnv = ""
@@ -34,14 +36,26 @@ struct ContentView: View {
                 }
                     .controlSize(.small)
                     .buttonStyle(.bordered)
-                Button("Stop All") { tunnelManager.stopAllTunnels() }
-                    .controlSize(.small)
-                    .buttonStyle(.bordered)
                 Button("Quit") { NSApp.terminate(nil) }
                     .controlSize(.small)
                     .buttonStyle(.bordered)
             }
         }
+    }
+
+    // A tiny toolbar placed between SOCKS card and tunnel cards
+    @ViewBuilder private var midControls: some View {
+        HStack(spacing: 8) {
+            Spacer(minLength: 8)
+            Button("Load Config") { openAndLoadConfig() }
+                .controlSize(.small)
+                .buttonStyle(.bordered)
+                .disabled(isPresentingConfigPanel)
+            Button("Stop All") { tunnelManager.stopAllTunnels() }
+                .controlSize(.small)
+                .buttonStyle(.bordered)
+        }
+        .padding(.horizontal, 2)
     }
 
     @ViewBuilder private var dynamicArea: some View {
@@ -326,6 +340,7 @@ struct ContentView: View {
         }
         // Width constraint only; height is scrollable
         .frame(maxWidth: maxContentWidth, alignment: .topLeading)
+        // remove fileImporter on config
     }
 
     @ViewBuilder
@@ -337,6 +352,11 @@ struct ContentView: View {
 
             SocksCard() // fixed SOCKS proxy control
                 .frame(maxWidth: .infinity, alignment: .leading)
+
+            // Insert the requested mid controls between the two cards
+            if !tunnelManager.tunnels.isEmpty {
+                midControls
+            }
 
             // Tunnels list
             if tunnelManager.tunnels.isEmpty {
@@ -421,13 +441,24 @@ struct ContentView: View {
 
     // MARK: - Config loader UI
     private func openAndLoadConfig() {
+        if isPresentingConfigPanel { return }
+        isPresentingConfigPanel = true
         let panel = NSOpenPanel()
         panel.title = "Choose a config JSON"
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = [UTType.json]
-        if panel.runModal() == .OK, let url = panel.url {
+        // Temporarily promote app to regular to get a proper, draggable open panel
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        let response = panel.runModal()
+        defer {
+            // Return app to accessory menu bar mode
+            NSApp.setActivationPolicy(.accessory)
+            isPresentingConfigPanel = false
+        }
+        if response == .OK, let url = panel.url {
             tunnelManager.loadConfig(from: url)
         }
     }
@@ -541,6 +572,8 @@ struct SocksCard: View {
 // Minimal SPAAS login card similar in style to TunnelCard/SocksCard
 struct SpaasLoginCard: View {
     @EnvironmentObject var tunnelManager: TunnelManager
+    @State private var showSpaasImporter: Bool = false
+    @State private var isPresentingSpaasPanel: Bool = false
 
     private func stateColor() -> Color {
         switch tunnelManager.spaasState {
@@ -572,6 +605,7 @@ struct SpaasLoginCard: View {
                 Button("Load spaas…") { pickSpaas() }
                     .controlSize(.small)
                     .buttonStyle(.bordered)
+                    .disabled(isPresentingSpaasPanel)
                 if tunnelManager.spaasState == .running {
                     Button("Running…") {}
                         .controlSize(.small)
@@ -628,6 +662,7 @@ struct SpaasLoginCard: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(.white.opacity(0.08), lineWidth: 1)
         )
+        // remove .fileImporter for spaas
     }
 
     private var dateFormatter: DateFormatter {
@@ -635,19 +670,28 @@ struct SpaasLoginCard: View {
     }
 
     private func pickSpaas() {
+        if isPresentingSpaasPanel { return }
+        isPresentingSpaasPanel = true
         let panel = NSOpenPanel()
         panel.title = "Select spaas executable"
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-        panel.allowedContentTypes = [.item] // allow any file; user picks executable
-        // Prefer common bin dirs for initial location
+        panel.allowedContentTypes = [.item]
         if FileManager.default.fileExists(atPath: "/opt/homebrew/bin") {
             panel.directoryURL = URL(fileURLWithPath: "/opt/homebrew/bin")
         } else if FileManager.default.fileExists(atPath: "/usr/local/bin") {
             panel.directoryURL = URL(fileURLWithPath: "/usr/local/bin")
         }
-        if panel.runModal() == .OK, let url = panel.url {
+        // Temporarily promote app to regular
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        let response = panel.runModal()
+        defer {
+            NSApp.setActivationPolicy(.accessory)
+            isPresentingSpaasPanel = false
+        }
+        if response == .OK, let url = panel.url {
             tunnelManager.setSpaasPath(url)
         }
     }
