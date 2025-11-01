@@ -763,7 +763,19 @@ class TunnelManager: ObservableObject {
 
     @Published var lastConfigURL: URL? = nil
 
-    struct ExternalConfigItem: Decodable {
+    struct cd /Volumes/mini_extend/Swift_proj/ProxyMb
+    
+    # Stage exactly the four files
+    git add -- ProxyMb/ContentView.swift ProxyMb/TunnelManager.swift README.md scripts/build_and_package.sh
+    
+    # Show what’s staged
+    git diff --cached --name-status
+    
+    # Create the commit (English message)
+    git commit -m "chore: snapshot current working state (ContentView, TunnelManager, README, build script)"
+    
+    # Show the commit summary
+    git log -1 --name-status --onelineExternalConfigItem: Decodable {
         let endpoint: String // remote target "host:port"
         let port: Int        // local port
         let alias: String    // tunnel display name
