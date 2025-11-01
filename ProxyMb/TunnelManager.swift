@@ -46,6 +46,78 @@ class TunnelManager: ObservableObject {
         return df.string(from: Date())
     }
 
+    // MARK: - SPAAS binary management (remote feature)
+
+    @Published var spaasAvailable: Bool = false
+    private let spaasPathDefaultsKey = "ProxyMb.spaasPath"
+    private var spaasCustomURL: URL? = nil
+
+    var spaasPathDescription: String {
+        if let u = spaasCustomURL { return "custom: \(u.path)" }
+        if let sys = resolveSystemSpaasPath() { return "system: \(sys)" }
+        return "system: (not found)"
+    }
+
+    // Ensure a file is executable; if not, try to add +x for user (best effort)
+    private func ensureExecutable(at url: URL) -> Bool {
+        let path = url.path
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: path) else { return false }
+        if fm.isExecutableFile(atPath: path) { return true }
+        // Try to chmod +x (u+x or 0755)
+        do {
+            let attrs = try fm.attributesOfItem(atPath: path)
+            if let perm = attrs[.posixPermissions] as? NSNumber {
+                let current = perm.uint16Value
+                let desired: UInt16 = current | 0o111 // add execute bits
+                if desired != current {
+                    try fm.setAttributes([.posixPermissions: NSNumber(value: desired)], ofItemAtPath: path)
+                }
+            } else {
+                try fm.setAttributes([.posixPermissions: NSNumber(value: 0o755)], ofItemAtPath: path)
+            }
+        } catch {
+            // Best effort; ignore
+        }
+        return fm.isExecutableFile(atPath: path)
+    }
+
+    func setSpaasPath(_ url: URL) {
+        // Accept selected file; try to ensure it's executable, but don't block if chmod fails
+        let ok = ensureExecutable(at: url)
+        if !ok {
+            appendInMemory(level: .stderr, "Selected spaas not executable yet; attempted to add +x: \(url.path)")
+        }
+        spaasCustomURL = url
+        UserDefaults.standard.set(url.path, forKey: spaasPathDefaultsKey)
+        DispatchQueue.main.async { self.spaasAvailable = true }
+        appendInMemory(level: .info, "Using custom spaas: \(url.path)")
+    }
+
+    private func loadSpaasPathFromDefaults() {
+        if let p = UserDefaults.standard.string(forKey: spaasPathDefaultsKey) {
+            let u = URL(fileURLWithPath: p)
+            let fm = FileManager.default
+            if fm.fileExists(atPath: u.path) {
+                _ = ensureExecutable(at: u)
+                spaasCustomURL = u
+            } else {
+                UserDefaults.standard.removeObject(forKey: spaasPathDefaultsKey)
+                spaasCustomURL = nil
+            }
+        }
+        // Update availability based on custom or system path
+        let available = (spaasCustomURL != nil) || (resolveSystemSpaasPath() != nil)
+        DispatchQueue.main.async { self.spaasAvailable = available }
+    }
+
+    private func resolveSystemSpaasPath() -> String? {
+        let (out, status) = runCommand("/usr/bin/which", ["spaas"])
+        guard status == 0 else { return nil }
+        let path = out.trimmingCharacters(in: .whitespacesAndNewlines)
+        return path.isEmpty ? nil : path
+    }
+
     // Enqueue a log entry into the pending buffer (thread-safe)
     private func appendInMemory(level: LogLevel, _ message: String) {
         let entry = LogEntry(timestamp: Date(), level: level, message: message)
@@ -154,10 +226,10 @@ class TunnelManager: ObservableObject {
     private var shortcutProcesses: [String: Process] = [:]
 
     // Structured shortcut groups (derived from aliases) - provide UI-friendly options
-    @Published var awsSystems: [String] = []            // unique --system values for aws
-    @Published var k8sSystems: [String] = []            // unique -s values for kubernetes
-    @Published var foundEnvs: [String] = []             // unique env values (prd/dev etc)
-    @Published var k8sContextBySystem: [String: String] = [:] // optional -C value per k8s system
+    @Published var awsSystems: [String] = []
+    @Published var k8sSystems: [String] = []
+    @Published var foundEnvs: [String] = []
+    @Published var k8sContextBySystem: [String: String] = [:]
 
     // Track running state for group-run operations (keys like "aws" and "kubernetes")
     @Published var groupState: [String: SpaasState] = ["aws": .idle, "kubernetes": .idle]
@@ -165,10 +237,14 @@ class TunnelManager: ObservableObject {
     @Published var groupLastRunAt: [String: Date] = [:]
     private var groupProcesses: [String: Process] = [:]
 
+    // Per-port listening cache used by UI portStatus
+    private var portListeningCache: [Int: Bool] = [:]
+
     init() {
         // Load home config if present; then reflect system state and start monitor
         loadDefaultConfigIfPresent()
         loadShortcuts()
+        loadSpaasPathFromDefaults()
         refreshStatusFromSystem()
         startStatusMonitor()
         startLogFlushTimer()
@@ -252,6 +328,7 @@ class TunnelManager: ObservableObject {
             // Reload from disk
             self.loadDefaultConfigIfPresent()
             self.loadShortcuts()
+            self.loadSpaasPathFromDefaults()
             self.refreshStatusFromSystem()
             self.writeLog("Refresh complete")
         }
@@ -399,7 +476,6 @@ class TunnelManager: ObservableObject {
             socksProcess = nil
         }
         isSocksActive = false
-        // System-level cleanup for port 1080
         DispatchQueue.global(qos: .utility).async { [weak self] in
             self?.systemKillForPorts([self?.socksPort ?? 1080])
         }
@@ -486,20 +562,29 @@ class TunnelManager: ObservableObject {
         terminate(pids: allPids)
     }
 
-    // New: refresh tunnels active state from current system listeners
+    // New: refresh tunnels active state and per-port listeners from system
     func refreshStatusFromSystem() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self = self else { return }
             var statusByID: [UUID: Bool] = [:]
-            // Snapshot tunnels to avoid mutation while iterating
+            var newPortCache: [Int: Bool] = [:]
+            // Build set of all ports we care about
             let snapshot = self.tunnels
-            for t in snapshot {
-                let allPortsListening = t.localPorts.allSatisfy { !self.pidsListening(onLocalPort: $0).isEmpty }
-                statusByID[t.id] = allPortsListening
+            var allPorts = Set<Int>()
+            for t in snapshot { allPorts.formUnion(t.localPorts) }
+            allPorts.insert(self.socksPort)
+            for p in allPorts {
+                let listening = !self.pidsListening(onLocalPort: p).isEmpty
+                newPortCache[p] = listening
             }
-            // Also refresh fixed SOCKS state
-            let socksActive = !self.pidsListening(onLocalPort: self.socksPort).isEmpty
+            // Derive tunnel active from per-port cache
+            for t in snapshot {
+                let allListening = t.localPorts.allSatisfy { newPortCache[$0] == true }
+                statusByID[t.id] = allListening
+            }
+            let socksActive = (newPortCache[self.socksPort] == true)
             DispatchQueue.main.async {
+                self.portListeningCache = newPortCache
                 for i in self.tunnels.indices {
                     if let s = statusByID[self.tunnels[i].id] {
                         self.tunnels[i].isActive = s
@@ -515,7 +600,6 @@ class TunnelManager: ObservableObject {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self = self else { return }
 
-            // Allow repeat runs: if a previous process exists but is not running, clear it; if running, ignore.
             if let p = self.spaasProcess {
                 if p.isRunning {
                     self.appendInMemory(level: .info, "spaas login requested but already running")
@@ -526,11 +610,30 @@ class TunnelManager: ObservableObject {
             }
 
             let task = Process()
-            task.launchPath = "/usr/bin/env"
-            task.arguments = ["spaas", "login"]
+            var usedShellFallback = false
+            if let custom = self.spaasCustomURL {
+                // Prefer running the custom binary directly; if not executable, try bash fallback
+                if FileManager.default.isExecutableFile(atPath: custom.path) {
+                    task.launchPath = custom.path
+                    task.arguments = ["login"]
+                } else {
+                    task.launchPath = "/bin/bash"
+                    task.arguments = [custom.path, "login"]
+                    usedShellFallback = true
+                }
+            } else {
+                // Fallback to env-resolved spaas
+                task.launchPath = "/usr/bin/env"
+                task.arguments = ["spaas", "login"]
+            }
 
             var env = ProcessInfo.processInfo.environment
             env["PATH"] = self.defaultPATH()
+            // Also prepend the directory of custom path if present, to help any relative deps
+            if let custom = self.spaasCustomURL {
+                let dir = URL(fileURLWithPath: custom.path).deletingLastPathComponent().path
+                env["PATH"] = dir + ":" + (env["PATH"] ?? "")
+            }
             task.environment = env
 
             let outPipe = Pipe()
@@ -538,7 +641,6 @@ class TunnelManager: ObservableObject {
             task.standardOutput = outPipe
             task.standardError = errPipe
 
-            // mark running
             DispatchQueue.main.async {
                 self.spaasState = .running
                 self.spaasLastRunAt = Date()
@@ -546,7 +648,8 @@ class TunnelManager: ObservableObject {
             self.spaasProcess = task
 
             let preview = (task.arguments ?? []).joined(separator: " ")
-            self.writeLog("Launching: /usr/bin/env \(preview)")
+            if let lp = task.launchPath { self.writeLog("Launching: \(lp) \(preview)") }
+            if usedShellFallback { self.appendInMemory(level: .stderr, "Custom spaas not executable; using bash fallback to run it") }
             self.appendInMemory(level: .info, "Launching: spaas login")
 
             let capture: (FileHandle, LogLevel) -> Void = { [weak self] fh, lvl in
@@ -575,6 +678,8 @@ class TunnelManager: ObservableObject {
                     self.spaasLastExitStatus = Int(status)
                     self.spaasProcess = nil
                     self.spaasState = (status == 0) ? .success : .failure
+                    // Re-evaluate availability in case PATH/custom changed
+                    self.spaasAvailable = (self.spaasCustomURL != nil) || (self.resolveSystemSpaasPath() != nil)
                 }
             }
 
@@ -601,7 +706,6 @@ class TunnelManager: ObservableObject {
             var results: [Shortcut] = []
             if FileManager.default.fileExists(atPath: zshURL.path) {
                 if let content = try? String(contentsOf: zshURL, encoding: .utf8) {
-                    // Parse lines like: alias ll='ls -la'  or alias gs="git status"
                     let pattern = "^\\s*alias\\s+([A-Za-z0-9_+-]+)=['\"](.*?)['\"]\\s*$"
                     if let re = try? NSRegularExpression(pattern: pattern, options: [.anchorsMatchLines]) {
                         let ns = content as NSString
@@ -617,7 +721,6 @@ class TunnelManager: ObservableObject {
                 }
             }
 
-            // Build structured groups from parsed shortcuts
             var awsSet = Set<String>()
             var k8sSet = Set<String>()
             var envSet = Set<String>()
@@ -625,33 +728,18 @@ class TunnelManager: ObservableObject {
 
             for sc in results {
                 let cmd = sc.command
-                // Normalize spacing to make regex simpler
                 _ = cmd.replacingOccurrences(of: "=", with: " = ")
 
                 if cmd.contains("spaas aws") {
-                    // extract --system <value> and --env <value>
-                    if let sys = firstMatch(in: cmd, pattern: "--system\\s+([\\S]+)") {
-                        let s = sanitizeToken(sys)
-                        awsSet.insert(s)
-                    }
-                    if let e = firstMatch(in: cmd, pattern: "--env\\s+([\\S]+)") {
-                        let ev = sanitizeToken(e)
-                        envSet.insert(ev)
-                    }
+                    if let sys = firstMatch(in: cmd, pattern: "--system\\s+([\\S]+)") { awsSet.insert(sanitizeToken(sys)) }
+                    if let e = firstMatch(in: cmd, pattern: "--env\\s+([\\S]+)") { envSet.insert(sanitizeToken(e)) }
                 } else if cmd.contains("spaas kubernetes") || cmd.contains("spaas k8s") {
-                    // extract -s <value>, -C <context>, and -A <env>
                     if let sys = firstMatch(in: cmd, pattern: "-s\\s+([\\S]+)") {
                         let s = sanitizeToken(sys)
                         k8sSet.insert(s)
-                        if let ctx = firstMatch(in: cmd, pattern: "-C\\s+([\\S]+)") {
-                            let c = sanitizeToken(ctx)
-                            k8sContextMap[s] = c
-                        }
+                        if let ctx = firstMatch(in: cmd, pattern: "-C\\s+([\\S]+)") { k8sContextMap[s] = sanitizeToken(ctx) }
                     }
-                    if let e = firstMatch(in: cmd, pattern: "-A\\s+([\\S]+)") {
-                        let ev = sanitizeToken(e)
-                        envSet.insert(ev)
-                    }
+                    if let e = firstMatch(in: cmd, pattern: "-A\\s+([\\S]+)") { envSet.insert(sanitizeToken(e)) }
                 }
             }
 
@@ -659,49 +747,35 @@ class TunnelManager: ObservableObject {
             let k8sList = Array(k8sSet).sorted()
             let envList = Array(envSet).sorted()
 
-            // Emit more detailed detection info to logs for visibility
             self.writeLog("Detected aws systems: \(awsList.joined(separator: ", "))")
             self.writeLog("Detected k8s systems: \(k8sList.joined(separator: ", "))")
             self.writeLog("Detected envs: \(envList.joined(separator: ", "))")
 
             DispatchQueue.main.async {
-                 self.shortcuts = results
-                 // initialize states
-                 for s in results {
-                     if self.shortcutStates[s.name] == nil {
-                         self.shortcutStates[s.name] = .idle
-                     }
-                 }
-
-                 // publish structured groups
-                 self.awsSystems = awsList
-                 self.k8sSystems = k8sList
-                 self.foundEnvs = envList
-                 self.k8sContextBySystem = k8sContextMap
-
-                 // ensure group state entries exist
-                 if self.groupState["aws"] == nil { self.groupState["aws"] = .idle }
-                 if self.groupState["kubernetes"] == nil { self.groupState["kubernetes"] = .idle }
-             }
+                self.shortcuts = results
+                for s in results { if self.shortcutStates[s.name] == nil { self.shortcutStates[s.name] = .idle } }
+                self.awsSystems = awsList
+                self.k8sSystems = k8sList
+                self.foundEnvs = envList
+                self.k8sContextBySystem = k8sContextMap
+                if self.groupState["aws"] == nil { self.groupState["aws"] = .idle }
+                if self.groupState["kubernetes"] == nil { self.groupState["kubernetes"] = .idle }
+            }
 
             self.writeLog("Loaded shortcuts: \(results.count) from \(zshURL.path)")
         }
     }
 
-    // Helper: return first capture group match
     private func firstMatch(in text: String, pattern: String) -> String? {
         if let re = try? NSRegularExpression(pattern: pattern, options: []) {
             let ns = text as NSString
             if let m = re.firstMatch(in: text, options: [], range: NSRange(location: 0, length: ns.length)) {
-                if m.numberOfRanges >= 2 {
-                    return ns.substring(with: m.range(at: 1))
-                }
+                if m.numberOfRanges >= 2 { return ns.substring(with: m.range(at: 1)) }
             }
         }
         return nil
     }
 
-    // Helper: sanitize tokens extracted from alias commands (strip quotes/parentheses)
     private func sanitizeToken(_ s: String) -> String {
         var t = s.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimSet = CharacterSet(charactersIn: "\"'()")
@@ -709,13 +783,11 @@ class TunnelManager: ObservableObject {
         return t
     }
 
-    // Run a grouped shortcut (aws or kubernetes) by composing a command from chosen parameters
     func runGroup(kind: String, system: String, env: String) {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self = self else { return }
-            let key = kind // "aws" or "kubernetes"
+            let key = kind
 
-            // Allow repeat runs: only block if an existing process is actually running.
             if let existing = self.groupProcesses[key] {
                 if existing.isRunning {
                     self.appendInMemory(level: .info, "group \(key) run requested but already running")
@@ -726,12 +798,25 @@ class TunnelManager: ObservableObject {
             }
 
             let task = Process()
-            task.launchPath = "/usr/bin/env"
-            var args: [String] = ["spaas"]
+            var args: [String] = []
+            var usedShellFallback = false
+            if let custom = self.spaasCustomURL {
+                // Use custom spaas path directly if executable; otherwise bash fallback
+                if FileManager.default.isExecutableFile(atPath: custom.path) {
+                    task.launchPath = custom.path
+                } else {
+                    task.launchPath = "/bin/bash"
+                    args.append(custom.path)
+                    usedShellFallback = true
+                }
+            } else {
+                task.launchPath = "/usr/bin/env"
+                args.append("spaas")
+            }
+
             if key == "aws" {
                 args.append(contentsOf: ["aws", "configure", "--system", system, "--env", env])
             } else {
-                // assume kubernetes
                 args.append(contentsOf: ["kubernetes", "configure", "-s", system])
                 if let ctx = self.k8sContextBySystem[system] { args.append(contentsOf: ["-C", ctx]) }
                 args.append(contentsOf: ["-A", env])
@@ -740,6 +825,10 @@ class TunnelManager: ObservableObject {
 
             var envVars = ProcessInfo.processInfo.environment
             envVars["PATH"] = self.defaultPATH()
+            if let custom = self.spaasCustomURL {
+                let dir = URL(fileURLWithPath: custom.path).deletingLastPathComponent().path
+                envVars["PATH"] = dir + ":" + (envVars["PATH"] ?? "")
+            }
             task.environment = envVars
 
             let out = Pipe(); let err = Pipe()
@@ -750,8 +839,9 @@ class TunnelManager: ObservableObject {
                 self.groupLastRunAt[key] = Date()
             }
 
-            let preview = args.joined(separator: " ")
-            self.writeLog("Launching group: /usr/bin/env \(preview)")
+            let preview = (task.arguments ?? []).joined(separator: " ")
+            if let lp = task.launchPath { self.writeLog("Launching group: \(lp) \(preview)") }
+            if usedShellFallback { self.appendInMemory(level: .stderr, "Custom spaas not executable; using bash fallback to run group \(key)") }
             self.appendInMemory(level: .info, "Launching group: \(key) system=\(system) env=\(env)")
 
             let capture: (FileHandle, LogLevel) -> Void = { [weak self] fh, lvl in
@@ -801,10 +891,7 @@ class TunnelManager: ObservableObject {
     // MARK: - Public stop APIs (non-blocking)
 
     func stopTunnel(for tunnelID: UUID) {
-        if let p = processes[tunnelID] {
-            p.terminate()
-            processes[tunnelID] = nil
-        }
+        if let p = processes[tunnelID] { p.terminate(); processes[tunnelID] = nil }
         guard let idx = tunnels.firstIndex(where: { $0.id == tunnelID }) else { return }
         let ports = tunnels[idx].localPorts
         tunnels[idx].isActive = false
@@ -822,6 +909,12 @@ class TunnelManager: ObservableObject {
         }
     }
 
+    // Expose port status for UI (remote feature)
+    func portStatus(for port: Int) -> PortStatus {
+        if let s = portListeningCache[port] { return s ? .listening : .notListening }
+        return .unknown
+    }
+
     // MARK: - Paths for config
     private func homeDir() -> URL { FileManager.default.homeDirectoryForCurrentUser }
     private func configDir() -> URL { homeDir().appendingPathComponent("ProxyMb", isDirectory: true) }
@@ -832,18 +925,18 @@ class TunnelManager: ObservableObject {
     @Published var lastConfigURL: URL? = nil
 
     struct ExternalConfigItem: Codable {
-        let endpoint: String // remote target "host:port"
-        let port: Int        // local port
-        let alias: String    // tunnel display name
-        let sshHost: String? // optional ssh host alias, defaults to "tunnel"
+        let endpoint: String
+        let port: Int
+        let alias: String
+        let sshHost: String?
     }
 
     private func makeTunnels(from items: [ExternalConfigItem]) -> [TunnelConfig] {
         items.map { it in
             TunnelConfig(
                 name: it.alias,
-                localPorts: [it.port],
-                remoteTargets: [it.endpoint],
+                localPorts: [ it.port ],
+                remoteTargets: [ it.endpoint ],
                 sshHost: it.sshHost ?? "tunnel",
                 isActive: false
             )
@@ -854,7 +947,6 @@ class TunnelManager: ObservableObject {
         try JSONDecoder().decode([ExternalConfigItem].self, from: data)
     }
 
-    // Load a config and optionally save a copy to ~/ProxyMb/config.json when it's not the same file
     func loadConfig(from url: URL) {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
@@ -863,10 +955,8 @@ class TunnelManager: ObservableObject {
                 let items = try self.decodeConfigItems(from: data)
                 let newTunnels = self.makeTunnels(from: items)
 
-                // If source is not the home config path, save a copy there
                 let homeURL = self.homeConfigURL()
                 if url.standardizedFileURL.path != homeURL.standardizedFileURL.path {
-                    // Ensure directory exists
                     if !FileManager.default.fileExists(atPath: self.configDir().path) {
                         try? FileManager.default.createDirectory(at: self.configDir(), withIntermediateDirectories: true)
                     }
@@ -893,7 +983,6 @@ class TunnelManager: ObservableObject {
         }
     }
 
-    // On launch, try ~/ProxyMb/config.json; if missing, leave empty and log guidance
     func loadDefaultConfigIfPresent() {
         let u = homeConfigURL()
         if FileManager.default.fileExists(atPath: u.path) {
