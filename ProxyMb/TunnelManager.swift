@@ -65,8 +65,8 @@ class TunnelManager: ObservableObject {
             if FileManager.default.fileExists(atPath: url.path) {
                 do {
                     let fh = try FileHandle(forWritingTo: url)
-                    try fh.seekToEnd()
-                    try fh.write(contentsOf: data)
+                    _ = try? fh.seekToEnd()
+                    fh.write(data)
                     try fh.close()
                 } catch { /* ignore */ }
             } else {
@@ -259,7 +259,7 @@ class TunnelManager: ObservableObject {
                 if data.isEmpty { return }
                 if let s = String(data: data, encoding: .utf8), !s.isEmpty {
                     let line = s.trimmingCharacters(in: .whitespacesAndNewlines)
-                    self?.writeLog("[spaas \(lvl == .stdout ? "stdout" : "stderr")] \(line)")
+                    self?.writeLog("[spaas \(lvl == .stdout ? \"stdout\" : \"stderr\")] \(line)")
                     self?.appendInMemory(level: lvl, line)
                 }
             }
@@ -441,7 +441,7 @@ class TunnelManager: ObservableObject {
                 if data.isEmpty { return }
                 if let s = String(data: data, encoding: .utf8), !s.isEmpty {
                     let line = s.trimmingCharacters(in: .whitespacesAndNewlines)
-                    self?.writeLog("[\(level == .stdout ? "stdout" : "stderr")] \(line)")
+                    self?.writeLog("[\(level == .stdout ? \"stdout\" : \"stderr\")] \(line)")
                     self?.appendInMemory(level: level, line)
                 }
             }
@@ -552,7 +552,7 @@ class TunnelManager: ObservableObject {
                 if data.isEmpty { return }
                 if let s = String(data: data, encoding: .utf8), !s.isEmpty {
                     let line = s.trimmingCharacters(in: .whitespacesAndNewlines)
-                    self?.writeLog("[SOCKS \(lvl == .stdout ? "stdout" : "stderr")] \(line)")
+                    self?.writeLog("[SOCKS \(lvl == .stdout ? \"stdout\" : \"stderr\")] \(line)")
                     self?.appendInMemory(level: lvl, line)
                 }
             }
@@ -763,27 +763,14 @@ class TunnelManager: ObservableObject {
 
     @Published var lastConfigURL: URL? = nil
 
-    struct cd /Volumes/mini_extend/Swift_proj/ProxyMb
-    
-    # Stage exactly the four files
-    git add -- ProxyMb/ContentView.swift ProxyMb/TunnelManager.swift README.md scripts/build_and_package.sh
-    
-    # Show what’s staged
-    git diff --cached --name-status
-    
-    # Create the commit (English message)
-    git commit -m "chore: snapshot current working state (ContentView, TunnelManager, README, build script)"
-    
-    # Show the commit summary
-    git log -1 --name-status --onelineExternalConfigItem: Decodable {
-        let endpoint: String // remote target "host:port"
-        let port: Int        // local port
-        let alias: String    // tunnel display name
-        let sshHost: String? // optional ssh host alias, defaults to "tunnel"
+    struct ExternalConfigItem: Decodable {
+        let endpoint: String
+        let port: Int
+        let alias: String
+        let sshHost: String?
 
         enum CodingKeys: String, CodingKey {
             case endpoint, port, alias, sshHost
-            // synonyms supported for backwards compatibility
             case remote, target
             case name, label, title
             case ssh
@@ -798,18 +785,14 @@ class TunnelManager: ObservableObject {
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
-            // endpoint: endpoint | remote | target
             let endpoint = try c.decodeIfPresent(String.self, forKey: .endpoint)
                 ?? c.decodeIfPresent(String.self, forKey: .remote)
                 ?? c.decodeIfPresent(String.self, forKey: .target)
-            // alias: alias | name | label | title
             let alias = try c.decodeIfPresent(String.self, forKey: .alias)
                 ?? c.decodeIfPresent(String.self, forKey: .name)
                 ?? c.decodeIfPresent(String.self, forKey: .label)
                 ?? c.decodeIfPresent(String.self, forKey: .title)
-            // port
             let port = try c.decodeIfPresent(Int.self, forKey: .port)
-            // sshHost: sshHost | ssh
             let sshHost = try c.decodeIfPresent(String.self, forKey: .sshHost)
                 ?? c.decodeIfPresent(String.self, forKey: .ssh)
             guard let endpointUnwrapped = endpoint, let aliasUnwrapped = alias, let portUnwrapped = port else {
