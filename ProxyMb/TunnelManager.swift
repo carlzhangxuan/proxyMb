@@ -546,6 +546,16 @@ class TunnelManager: ObservableObject {
             socksProcess = nil
         }
         isSocksActive = false
+        // Disable system SOCKS for all services (best-effort)
+        let tool = "/usr/sbin/networksetup"
+        if FileManager.default.isExecutableFile(atPath: tool) {
+            let services = listNetworkServices()
+            for svc in services { _ = runCommand(tool, ["-setsocksfirewallproxystate", svc, "off"]) }
+            writeLog("Disabled system SOCKS on stopSocks() for all services")
+        } else {
+            writeLog("networksetup not available; could not disable system SOCKS on stopSocks()")
+        }
+        // Sweep any orphaned listeners on 1080
         DispatchQueue.global(qos: .utility).async { [weak self] in
             self?.systemKillForPorts([self?.socksPort ?? 1080])
         }
