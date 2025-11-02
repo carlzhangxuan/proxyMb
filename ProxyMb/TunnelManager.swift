@@ -351,6 +351,9 @@ class TunnelManager: ObservableObject {
             guard let self = self else { return }
             self.writeLog("Refreshing all state (soft restart)…")
 
+            // Pause periodic monitor to avoid races while resetting
+            self.stopStatusMonitor()
+
             // Collect PIDs to terminate (handles stuck processes robustly)
             var pidsToKill = Set<Int32>()
             if let p = self.spaasProcess, p.isRunning { pidsToKill.insert(p.processIdentifier) }
@@ -400,6 +403,9 @@ class TunnelManager: ObservableObject {
             self.loadShortcuts()
             self.loadSpaasPathFromDefaults()
             self.refreshStatusFromSystem()
+
+            // Resume monitor after state is consistent
+            self.startStatusMonitor()
             self.writeLog("Refresh complete")
         }
     }
@@ -976,19 +982,25 @@ class TunnelManager: ObservableObject {
     // MARK: - Public stop APIs (non-blocking)
 
     func stopTunnel(for tunnelID: UUID) {
-        if let p = processes[tunnelID] { p.terminate(); processes[tunnelID] = nil }
+        if let p = processes[tunnelID] { p.terminate() }
+        processes[tunnelID] = nil
         guard let idx = tunnels.firstIndex(where: { $0.id == tunnelID }) else { return }
         let ports = tunnels[idx].localPorts
-        tunnels[idx].isActive = false
+        DispatchQueue.main.async { self.tunnels[idx].isActive = false }
         DispatchQueue.global(qos: .utility).async { [weak self] in
             self?.systemKillForPorts(ports)
         }
     }
 
     func stopAllTunnels() {
-        for (id, p) in processes { p.terminate(); processes[id] = nil }
+        // Snapshot then terminate to avoid mutating while iterating
+        let procs = processes
+        for (_, p) in procs { p.terminate() }
+        processes.removeAll()
         let allPorts = Array(Set(tunnels.flatMap { $0.localPorts }))
-        for i in tunnels.indices { tunnels[i].isActive = false }
+        DispatchQueue.main.async {
+            for i in self.tunnels.indices { self.tunnels[i].isActive = false }
+        }
         DispatchQueue.global(qos: .utility).async { [weak self] in
             self?.systemKillForPorts(allPorts)
         }
