@@ -54,7 +54,7 @@ class TunnelManager: ObservableObject {
 
     var spaasPathDescription: String {
         if let u = spaasCustomURL { return "custom: \(u.path)" }
-        if let sys = resolveSystemSpaasPath() { return "system: \(sys)" }
+        if let sys = resolveSpaasURL()?.path { return "system: \(sys)" }
         return "system: (not found)"
     }
 
@@ -90,7 +90,10 @@ class TunnelManager: ObservableObject {
         }
         spaasCustomURL = url
         UserDefaults.standard.set(url.path, forKey: spaasPathDefaultsKey)
-        DispatchQueue.main.async { self.spaasAvailable = true }
+        // Make it discoverable for shells too
+        _ = ensureSpaasSymlink(target: url)
+        let available = (resolveSpaasURL() != nil)
+        DispatchQueue.main.async { self.spaasAvailable = available }
         appendInMemory(level: .info, "Using custom spaas: \(url.path)")
     }
 
@@ -107,15 +110,72 @@ class TunnelManager: ObservableObject {
             }
         }
         // Update availability based on custom or system path
-        let available = (spaasCustomURL != nil) || (resolveSystemSpaasPath() != nil)
+        let available = (resolveSpaasURL() != nil)
         DispatchQueue.main.async { self.spaasAvailable = available }
     }
 
     private func resolveSystemSpaasPath() -> String? {
-        let (out, status) = runCommand("/usr/bin/which", ["spaas"])
-        guard status == 0 else { return nil }
-        let path = out.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Use which but ensure PATH contains common locations and user bins
+        let envPath = defaultPATH()
+        let proc = Process()
+        proc.launchPath = "/usr/bin/env"
+        proc.arguments = ["/usr/bin/which", "spaas"]
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = envPath
+        proc.environment = env
+        let pipe = Pipe(); proc.standardOutput = pipe; proc.standardError = pipe
+        do { try proc.run() } catch { return nil }
+        proc.waitUntilExit()
+        guard proc.terminationStatus == 0 else { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return path.isEmpty ? nil : path
+    }
+
+    // Preferred resolution: custom → common install paths → which with expanded PATH
+    private func resolveSpaasURL() -> URL? {
+        if let u = spaasCustomURL, FileManager.default.isExecutableFile(atPath: u.path) { return u }
+        let home = NSHomeDirectory()
+        let candidates = [
+            home + "/.local/bin/spaas",
+            home + "/bin/spaas",
+            "/opt/homebrew/bin/spaas",
+            "/usr/local/bin/spaas",
+            "/usr/bin/spaas",
+            "/bin/spaas"
+        ]
+        for p in candidates where FileManager.default.isExecutableFile(atPath: p) {
+            return URL(fileURLWithPath: p)
+        }
+        if let whichPath = resolveSystemSpaasPath() {
+            let p = whichPath
+            if FileManager.default.isExecutableFile(atPath: p) { return URL(fileURLWithPath: p) }
+        }
+        return nil
+    }
+
+    // Ensure ~/.local/bin/spaas points to the chosen spaas so shells can find it
+    @discardableResult
+    private func ensureSpaasSymlink(target exeURL: URL) -> Bool {
+        let home = NSHomeDirectory()
+        let dir = URL(fileURLWithPath: home).appendingPathComponent(".local/bin", isDirectory: true)
+        let link = dir.appendingPathComponent("spaas")
+        do {
+            if !FileManager.default.fileExists(atPath: dir.path) {
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                writeLog("Created directory: \(dir.path)")
+            }
+            if FileManager.default.fileExists(atPath: link.path) {
+                // If existing symlink points elsewhere, replace it
+                try? FileManager.default.removeItem(at: link)
+            }
+            try FileManager.default.createSymbolicLink(at: link, withDestinationURL: exeURL)
+            writeLog("Created symlink: \(link.path) → \(exeURL.path)")
+            return true
+        } catch {
+            writeLog("Failed to create symlink for spaas at \(link.path): \(error.localizedDescription)")
+            return false
+        }
     }
 
     // Enqueue a log entry into the pending buffer (thread-safe)
@@ -190,9 +250,19 @@ class TunnelManager: ObservableObject {
     }
 
     private func defaultPATH() -> String {
-        // Merge common paths to find Homebrew ssh if needed
+        // Merge common paths to find Homebrew ssh/spaas if needed, plus user bin dirs
         let current = ProcessInfo.processInfo.environment["PATH"] ?? ""
-        let extras = ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+        let home = NSHomeDirectory()
+        let extras = [
+            "/usr/local/bin",
+            "/opt/homebrew/bin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
+            home + "/.local/bin",
+            home + "/bin"
+        ]
         var parts = current.split(separator: ":").map(String.init)
         for e in extras where !parts.contains(e) { parts.append(e) }
         return parts.joined(separator: ":")
@@ -476,6 +546,16 @@ class TunnelManager: ObservableObject {
             socksProcess = nil
         }
         isSocksActive = false
+        // Disable system SOCKS for all services (best-effort)
+        let tool = "/usr/sbin/networksetup"
+        if FileManager.default.isExecutableFile(atPath: tool) {
+            let services = listNetworkServices()
+            for svc in services { _ = runCommand(tool, ["-setsocksfirewallproxystate", svc, "off"]) }
+            writeLog("Disabled system SOCKS on stopSocks() for all services")
+        } else {
+            writeLog("networksetup not available; could not disable system SOCKS on stopSocks()")
+        }
+        // Sweep any orphaned listeners on 1080
         DispatchQueue.global(qos: .utility).async { [weak self] in
             self?.systemKillForPorts([self?.socksPort ?? 1080])
         }
@@ -611,8 +691,12 @@ class TunnelManager: ObservableObject {
 
             let task = Process()
             var usedShellFallback = false
-            if let custom = self.spaasCustomURL {
-                // Prefer running the custom binary directly; if not executable, try bash fallback
+            if let exe = self.resolveSpaasURL() {
+                // Run resolved executable directly
+                task.launchPath = exe.path
+                task.arguments = ["login"]
+            } else if let custom = self.spaasCustomURL {
+                // fallback to custom path through bash if not executable
                 if FileManager.default.isExecutableFile(atPath: custom.path) {
                     task.launchPath = custom.path
                     task.arguments = ["login"]
@@ -622,14 +706,13 @@ class TunnelManager: ObservableObject {
                     usedShellFallback = true
                 }
             } else {
-                // Fallback to env-resolved spaas
+                // Final fallback to env-resolved spaas using expanded PATH
                 task.launchPath = "/usr/bin/env"
                 task.arguments = ["spaas", "login"]
             }
 
             var env = ProcessInfo.processInfo.environment
             env["PATH"] = self.defaultPATH()
-            // Also prepend the directory of custom path if present, to help any relative deps
             if let custom = self.spaasCustomURL {
                 let dir = URL(fileURLWithPath: custom.path).deletingLastPathComponent().path
                 env["PATH"] = dir + ":" + (env["PATH"] ?? "")
@@ -679,7 +762,7 @@ class TunnelManager: ObservableObject {
                     self.spaasProcess = nil
                     self.spaasState = (status == 0) ? .success : .failure
                     // Re-evaluate availability in case PATH/custom changed
-                    self.spaasAvailable = (self.spaasCustomURL != nil) || (self.resolveSystemSpaasPath() != nil)
+                    self.spaasAvailable = (self.resolveSpaasURL() != nil)
                 }
             }
 
@@ -800,8 +883,10 @@ class TunnelManager: ObservableObject {
             let task = Process()
             var args: [String] = []
             var usedShellFallback = false
-            if let custom = self.spaasCustomURL {
-                // Use custom spaas path directly if executable; otherwise bash fallback
+            // Use same resolution as spaasLogin for consistency
+            if let exe = self.resolveSpaasURL() {
+                task.launchPath = exe.path
+            } else if let custom = self.spaasCustomURL {
                 if FileManager.default.isExecutableFile(atPath: custom.path) {
                     task.launchPath = custom.path
                 } else {
@@ -994,7 +1079,59 @@ class TunnelManager: ObservableObject {
                 self.tunnels = []
                 self.lastConfigURL = nil
                 self.refreshStatusFromSystem()
+                // Also refresh spaas availability on cold start
+                self.spaasAvailable = (self.resolveSpaasURL() != nil)
             }
         }
+    }
+
+    private func listNetworkServices() -> [String] {
+        let tool = "/usr/sbin/networksetup"
+        guard FileManager.default.isExecutableFile(atPath: tool) else { return [] }
+        let (out, code) = runCommand(tool, ["-listallnetworkservices"])
+        guard code == 0 else { return [] }
+        var result: [String] = []
+        for (idx, raw) in out.split(separator: "\n").enumerated() {
+            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if idx == 0 && line.lowercased().contains("asterisk") { continue }
+            if line.isEmpty { continue }
+            if line.hasPrefix("*") { continue }
+            result.append(line)
+        }
+        return result
+    }
+
+    // MARK: - App Lifecycle Cleanup (ensure SOCKS:1080 and tunnels are stopped when app quits)
+    func cleanupSystemProxyOnExit() {
+        writeLog("App exiting - performing proxy/tunnel cleanup")
+        // Stop timers to avoid races
+        stopStatusMonitor()
+        stopLogFlushTimer()
+        // Stop SOCKS and all tunnels
+        stopSocks()
+        stopAllTunnels()
+        // Disable system SOCKS for all services (best-effort)
+        let tool = "/usr/sbin/networksetup"
+        if FileManager.default.isExecutableFile(atPath: tool) {
+            let services = listNetworkServices()
+            for svc in services {
+                let (_, code) = runCommand(tool, ["-setsocksfirewallproxystate", svc, "off"])
+                if code == 0 { writeLog("Disabled system SOCKS for [\(svc)] on exit") }
+                else { writeLog("Failed to disable system SOCKS for [\(svc)] on exit (code=\(code))") }
+            }
+        } else {
+            writeLog("networksetup not available; skipping system SOCKS disable")
+        }
+        // Sweep ports in case of orphaned ssh processes (1080 + all configured)
+        var ports = Array(Set(tunnels.flatMap { $0.localPorts }))
+        if !ports.contains(socksPort) { ports.append(socksPort) }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            self?.systemKillForPorts(ports)
+        }
+        // Update states for UI consistency
+        DispatchQueue.main.async {
+            self.isSocksActive = false
+        }
+        writeLog("Cleanup complete")
     }
 }
