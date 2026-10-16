@@ -35,24 +35,27 @@ jobs:
             -only-testing:ProxyMbTests \
             build test
 
-      - name: Zip app artifact (Debug)
-        if: always()
+      - name: Build and test release packaging
         shell: bash
         run: |
-          set -e
-          APP_PATH="build/Build/Products/Debug/ProxyMb.app"
-          if [ -d "$APP_PATH" ]; then
-            ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" ProxyMb-Debug.app.zip
-          else
-            echo "App not found at $APP_PATH, skipping zip"
-          fi
+          set -euo pipefail
+          xcodebuild \
+            -project ProxyMb.xcodeproj \
+            -scheme ProxyMb \
+            -configuration Release \
+            -derivedDataPath build \
+            -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+          bash scripts/test_package_app.sh build/Build/Products/Release/ProxyMb.app
+          VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' build/Build/Products/Release/ProxyMb.app/Contents/Info.plist)
+          bash scripts/package_app.sh build/Build/Products/Release/ProxyMb.app dist/ProxyMb-macos.zip "$VERSION"
 
       - name: Upload CI artifacts
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ci-artifacts
           path: |
-            ProxyMb-Debug.app.zip
+            dist/ProxyMb-macos.zip
           if-no-files-found: ignore
           retention-days: 7
