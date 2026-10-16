@@ -73,8 +73,24 @@ git push -u origin main
 ```
 
 ## Continuous Integration (CI)
-- Triggers: push/PR to `main` or `master`.
-- Workflow: `.github/workflows/ci.yml` builds an unsigned Release with Xcode on `macos-latest`.
+- Triggers: push/PR to `main` or `master`, or manual dispatch.
+- Workflow: `.github/workflows/ci.yml` runs core regression tests and builds an unsigned Release with Xcode on `macos-latest`.
+
+Run the regression suite locally with `swift test`. It uses temporary directories
+and controlled child processes; it does not launch the menu-bar app or change
+your system proxy. Set `PROXYMB_CONFIG_FIXTURE_DIRECTORY` to a directory of
+installed config JSON files to validate them read-only as well.
+
+Config imports validate local/remote ports, endpoint syntax, duplicate local
+ports, and SSH host arguments before saving or stopping any existing tunnel.
+Port 1080 is reserved for the built-in SOCKS proxy. IPv6 destinations use
+brackets, for example `[::1]:443`. Failed validation or saving leaves the current
+configuration in place.
+
+Stopping waits for the tracked processes before allowing another start. External
+SSH tunnels are detected from actual TCP listeners, not command-line text.
+Quit waits for cleanup instead of reloading the app. Only system SOCKS settings
+pointing to this machine's port 1080 are disabled.
 
 ## Create a Release (tag-driven)
 Create a semver-style tag starting with `v` (e.g. `v0.1.0`). The `Release` workflow will:
