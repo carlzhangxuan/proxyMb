@@ -59,6 +59,120 @@ final class ProxyMbTests: XCTestCase {
     }
 
     @MainActor
+    func testProductionShortcutsReloadWithoutStoppingProcesses() async throws {
+        // These are the seven systems from the actual shell configuration.
+        let systems = ["content-ml", "sn-location", "vertical-ml", "news-delivery",
+                       "sn-feed", "ml-serving", "ml-training"]
+        let aliases = systems.flatMap { system in
+            [
+                "alias aws-\(system)='eval \"$(spaas aws configure --system \(system) --env prd)\"'",
+                "alias k8s-\(system)='eval \"$(spaas kubernetes configure -s \(system) -C common-0 -A prd)\"'"
+            ]
+        }
+        let shellConfig = temporaryHome.appendingPathComponent(".zshrc")
+        try Data(aliases.prefix(4).joined(separator: "\n").utf8).write(to: shellConfig)
+        let manager = try fakeSSHManager()
+        manager.startSocks()
+        let process = try XCTUnwrap(manager.socksProcess)
+        defer { manager.stopSocks() }
+        manager.loadShortcuts()
+        XCTAssertTrue(manager.isLoadingShortcuts)
+        await drain(manager)
+        XCTAssertEqual(manager.awsSystems, ["content-ml", "sn-location"])
+
+        try Data(aliases.joined(separator: "\n").utf8).write(to: shellConfig)
+        manager.loadShortcuts()
+        manager.loadShortcuts() // Repeated requests while loading are coalesced.
+        await drain(manager)
+        XCTAssertFalse(manager.isLoadingShortcuts)
+        XCTAssertNil(manager.shortcutLoadError)
+        XCTAssertEqual(manager.awsSystems, systems.sorted())
+        XCTAssertEqual(manager.k8sSystems, systems.sorted())
+        XCTAssertEqual(manager.foundEnvs, ["prd"])
+        XCTAssertEqual(manager.shortcuts.count, 14)
+        for system in systems {
+            XCTAssertEqual(manager.k8sContextBySystem[system], "common-0")
+        }
+        XCTAssertEqual(manager.shortcutSourcePath, shellConfig.path)
+        XCTAssertTrue(manager.socksProcess === process)
+        XCTAssertTrue(process.isRunning, "Reading aliases must not stop SOCKS or execute spaas")
+        manager.stopSocks()
+        await drain(manager)
+    }
+
+    @MainActor
+    func testShortcutReadErrorsPreserveChoicesAndRecover() async throws {
+        let manager = manager()
+        let shellConfig = temporaryHome.appendingPathComponent(".zshrc")
+        manager.loadShortcuts()
+        await drain(manager)
+        XCTAssertNotNil(manager.shortcutLoadError, "Missing files must not fail silently")
+        XCTAssertFalse(manager.isLoadingShortcuts)
+
+        let alias = "alias content-aws-prd='eval \"$(spaas aws configure --system content-ml --env prd)\"'"
+        try Data(alias.utf8).write(to: shellConfig)
+        manager.loadShortcuts()
+        await drain(manager)
+        XCTAssertNil(manager.shortcutLoadError)
+        XCTAssertEqual(manager.awsSystems, ["content-ml"])
+
+        try Data([0xFF, 0xFE, 0xFF]).write(to: shellConfig)
+        manager.loadShortcuts()
+        await drain(manager)
+        XCTAssertNotNil(manager.shortcutLoadError, "Invalid UTF-8 must be reported")
+        XCTAssertFalse(manager.isLoadingShortcuts)
+        XCTAssertEqual(manager.awsSystems, ["content-ml"], "Read failures must keep working choices")
+
+        try Data().write(to: shellConfig)
+        manager.loadShortcuts()
+        await drain(manager)
+        XCTAssertNil(manager.shortcutLoadError)
+        XCTAssertTrue(manager.awsSystems.isEmpty, "A successfully read empty file clears old aliases")
+        XCTAssertTrue(manager.shortcuts.isEmpty)
+    }
+
+    @MainActor
+    func testShortcutPartialAndCommentedLinesDoNotCreateChoices() async throws {
+        let content = """
+        # alias disabled='$(spaas aws configure --system ignored --env prd)'
+        alias incomplete=
+        alias unfinished='$(spaas kubernetes configure -s ignored
+        alias unrelated='echo hello'
+        alias content-aws-prd='$(spaas aws configure --system content-ml --env prd)'
+        alias content-k8s-prd='$(spaas kubernetes configure -s content-ml -C common-0 -A prd)'
+        """
+        try Data(content.utf8).write(to: temporaryHome.appendingPathComponent(".zshrc"))
+        let manager = manager()
+        manager.loadShortcuts()
+        await drain(manager)
+        XCTAssertNil(manager.shortcutLoadError)
+        XCTAssertEqual(manager.awsSystems, ["content-ml"])
+        XCTAssertEqual(manager.k8sSystems, ["content-ml"])
+        XCTAssertEqual(manager.foundEnvs, ["prd"])
+        XCTAssertEqual(manager.shortcuts.count, 3)
+    }
+
+    @MainActor
+    func testInstalledShellShortcutsReadOnly() async throws {
+        guard let path = ProcessInfo.processInfo.environment["PROXYMB_ZSHRC_FIXTURE"] else {
+            throw XCTSkip("Set PROXYMB_ZSHRC_FIXTURE for the read-only installed shell configuration check")
+        }
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: path),
+                                        to: temporaryHome.appendingPathComponent(".zshrc"))
+        let manager = manager()
+        manager.loadShortcuts()
+        await drain(manager)
+        let expected = ["content-ml", "ml-serving", "ml-training", "news-delivery",
+                        "sn-feed", "sn-location", "vertical-ml"]
+        XCTAssertEqual(manager.awsSystems, expected)
+        XCTAssertEqual(manager.k8sSystems, expected)
+        XCTAssertEqual(manager.foundEnvs, ["dev", "prd"])
+        for system in expected {
+            XCTAssertEqual(manager.k8sContextBySystem[system], "common-0")
+        }
+    }
+
+    @MainActor
     func testLargeStdoutAndStderrUsingRealProjectFiles() async throws {
         let files = Array(repeating: realProjectFiles, count: 10).flatMap { $0 }
         let expected = try files.reduce(into: Data()) { $0.append(try Data(contentsOf: $1)) }

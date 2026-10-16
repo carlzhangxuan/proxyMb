@@ -135,6 +135,13 @@ This repo uses unsigned builds by default to keep setup simple.
 - App target: `ProxyMb` (macOS)
 
 ## Troubleshooting
+
+- The app version is shown beside **Tunnels** at the top and in the existing footer.
+- **Short Cuts** remains below the tunnel list and is collapsed by default. Scroll down and expand it to access AWS and Kubernetes.
+- Shortcuts are read directly from single-line aliases in `~/.zshrc` whenever the menu content appears. The section header shows the number of detected AWS and Kubernetes systems.
+- Use **Reload** beside **Short Cuts** to reread aliases without stopping tunnels or SOCKS. The top-level **Refresh** still resets runtime state and stops connections.
+- Read errors are shown in **Short Cuts**; previously loaded choices are retained until a successful reload. No shell startup file is executed during loading.
+
 - If the GitHub runner picks a wrong Xcode, the workflow pins to `/Applications/Xcode.app`.
 - If the build fails due to signing, confirm `CODE_SIGNING_ALLOWED=NO` is present.
 - For local packaging script, ensure it’s executable:

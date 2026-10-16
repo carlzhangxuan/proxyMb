@@ -27,6 +27,10 @@ struct ContentView: View {
     @ViewBuilder private var headerBar: some View {
         HStack(spacing: 12) {
             Text("Tunnels").font(.title3.bold())
+            Text(appVersionString)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("appVersion")
             Spacer()
             HStack(spacing: 8) {
                 Button("Refresh") {
@@ -59,9 +63,42 @@ struct ContentView: View {
     }
 
     // Shortcuts
-    @ViewBuilder private var shortcutsPanel: some View {
-        DisclosureGroup("Short Cuts") {
+    private var shortcutsHeader: some View {
+        HStack {
+            Text("Short Cuts").font(.subheadline.weight(.semibold))
+            Spacer()
+            Text("\(tunnelManager.awsSystems.count) AWS · \(tunnelManager.k8sSystems.count) K8s")
+                .font(.caption).foregroundStyle(.secondary)
+            if let error = tunnelManager.shortcutLoadError {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+                    .help(error)
+            }
+            Button(tunnelManager.isLoadingShortcuts ? "Loading…" : "Reload") {
+                tunnelManager.loadShortcuts()
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .disabled(tunnelManager.isLoadingShortcuts)
+            .help("Read \(tunnelManager.shortcutSourcePath) without stopping tunnels or SOCKS")
+        }
+    }
+
+    @ViewBuilder private var shortcutLoadNotice: some View {
+        if let error = tunnelManager.shortcutLoadError {
+            Text(error).font(.caption).foregroundStyle(.red)
+            Text("Previously loaded choices are kept. Correct the file and click Reload.")
+                .font(.caption).foregroundStyle(.secondary)
+        } else if !tunnelManager.isLoadingShortcuts,
+                  tunnelManager.awsSystems.isEmpty && tunnelManager.k8sSystems.isEmpty {
+            Text("Add spaas configure aliases to ~/.zshrc, then click Reload.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private var shortcutCards: some View {
             LazyVStack(alignment: .leading, spacing: 10) {
+                shortcutLoadNotice
                 // AWS
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 10) {
@@ -191,24 +228,31 @@ struct ContentView: View {
                 .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(.white.opacity(0.06), lineWidth: 1))
             }
             .padding(.vertical, 6)
-            .onAppear {
-                if selectedAwsSystem.isEmpty, let first = tunnelManager.awsSystems.first { selectedAwsSystem = first }
-                if selectedAwsEnv.isEmpty, let first = tunnelManager.foundEnvs.first { selectedAwsEnv = first }
-                if selectedK8sSystem.isEmpty, let first = tunnelManager.k8sSystems.first { selectedK8sSystem = first }
-                if selectedK8sEnv.isEmpty, let first = tunnelManager.foundEnvs.first { selectedK8sEnv = first }
-            }
-            .onChange(of: tunnelManager.awsSystems) { _, new in
-                if selectedAwsSystem.isEmpty || !new.contains(selectedAwsSystem) { selectedAwsSystem = new.first ?? "" }
-            }
-            .onChange(of: tunnelManager.k8sSystems) { _, new in
-                if selectedK8sSystem.isEmpty || !new.contains(selectedK8sSystem) { selectedK8sSystem = new.first ?? "" }
-            }
-            .onChange(of: tunnelManager.foundEnvs) { _, new in
-                if selectedAwsEnv.isEmpty || !new.contains(selectedAwsEnv) { selectedAwsEnv = new.first ?? "" }
-                if selectedK8sEnv.isEmpty || !new.contains(selectedK8sEnv) { selectedK8sEnv = new.first ?? "" }
-            }
+    }
+
+    private var shortcutsPanel: some View {
+        DisclosureGroup {
+            shortcutCards
+        } label: {
+            shortcutsHeader
         }
         .tint(.secondary)
+        .onAppear {
+            if selectedAwsSystem.isEmpty, let first = tunnelManager.awsSystems.first { selectedAwsSystem = first }
+            if selectedAwsEnv.isEmpty, let first = tunnelManager.foundEnvs.first { selectedAwsEnv = first }
+            if selectedK8sSystem.isEmpty, let first = tunnelManager.k8sSystems.first { selectedK8sSystem = first }
+            if selectedK8sEnv.isEmpty, let first = tunnelManager.foundEnvs.first { selectedK8sEnv = first }
+        }
+        .onChange(of: tunnelManager.awsSystems) { _, new in
+            if selectedAwsSystem.isEmpty || !new.contains(selectedAwsSystem) { selectedAwsSystem = new.first ?? "" }
+        }
+        .onChange(of: tunnelManager.k8sSystems) { _, new in
+            if selectedK8sSystem.isEmpty || !new.contains(selectedK8sSystem) { selectedK8sSystem = new.first ?? "" }
+        }
+        .onChange(of: tunnelManager.foundEnvs) { _, new in
+            if selectedAwsEnv.isEmpty || !new.contains(selectedAwsEnv) { selectedAwsEnv = new.first ?? "" }
+            if selectedK8sEnv.isEmpty || !new.contains(selectedK8sEnv) { selectedK8sEnv = new.first ?? "" }
+        }
     }
 
     // Logs panel (collapsible)
@@ -274,6 +318,7 @@ struct ContentView: View {
             }
         }
         .frame(maxWidth: maxContentWidth, alignment: .topLeading)
+        .onAppear { tunnelManager.loadShortcuts() }
     }
 
     @ViewBuilder

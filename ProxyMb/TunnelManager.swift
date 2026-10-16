@@ -236,6 +236,9 @@ class TunnelManager: ObservableObject {
         let command: String
     }
     @Published var shortcuts: [Shortcut] = []
+    @Published private(set) var isLoadingShortcuts = false
+    @Published private(set) var shortcutLoadError: String?
+    var shortcutSourcePath: String { homeDir().appendingPathComponent(".zshrc").path }
     // Track per-shortcut state and last run info keyed by shortcut name
     @Published var shortcutStates: [String: SpaasState] = [:]
     @Published var shortcutLastExit: [String: Int] = [:]
@@ -744,25 +747,36 @@ class TunnelManager: ObservableObject {
     // MARK: - Shortcuts: load aliases from ~/.zshrc and run them
     func loadShortcuts() {
         dispatchPrecondition(condition: .onQueue(.main))
+        guard !isShuttingDown, !isLoadingShortcuts else { return }
+        isLoadingShortcuts = true
+        shortcutLoadError = nil
         systemQueue.async { [weak self] in
             guard let self = self else { return }
             let zshURL = self.homeDir().appendingPathComponent(".zshrc")
             var results: [Shortcut] = []
-            if FileManager.default.fileExists(atPath: zshURL.path) {
-                if let content = try? String(contentsOf: zshURL, encoding: .utf8) {
-                    let pattern = "^\\s*alias\\s+([A-Za-z0-9_+-]+)=['\"](.*?)['\"]\\s*$"
-                    if let re = try? NSRegularExpression(pattern: pattern, options: [.anchorsMatchLines]) {
-                        let ns = content as NSString
-                        let matches = re.matches(in: content, options: [], range: NSRange(location: 0, length: ns.length))
-                        for m in matches {
-                            if m.numberOfRanges >= 3 {
-                                let name = ns.substring(with: m.range(at: 1))
-                                let cmd = ns.substring(with: m.range(at: 2))
-                                results.append(Shortcut(name: name, command: cmd))
-                            }
-                        }
+            do {
+                let content = try String(contentsOf: zshURL, encoding: .utf8)
+                let pattern = "^\\s*alias\\s+([A-Za-z0-9_+-]+)=['\"](.*?)['\"]\\s*$"
+                let re = try NSRegularExpression(pattern: pattern, options: [.anchorsMatchLines])
+                let ns = content as NSString
+                let matches = re.matches(in: content, options: [], range: NSRange(location: 0, length: ns.length))
+                for m in matches {
+                    if m.numberOfRanges >= 3 {
+                        let name = ns.substring(with: m.range(at: 1))
+                        let cmd = ns.substring(with: m.range(at: 2))
+                        results.append(Shortcut(name: name, command: cmd))
                     }
                 }
+            } catch {
+                let message = "Cannot read \(zshURL.path): \(error.localizedDescription)"
+                self.writeLog(message)
+                self.appendInMemory(level: .error, message)
+                DispatchQueue.main.async {
+                    self.isLoadingShortcuts = false
+                    guard !self.isShuttingDown else { return }
+                    self.shortcutLoadError = message
+                }
+                return
             }
 
             var awsSet = Set<String>()
@@ -772,8 +786,6 @@ class TunnelManager: ObservableObject {
 
             for sc in results {
                 let cmd = sc.command
-                _ = cmd.replacingOccurrences(of: "=", with: " = ")
-
                 if cmd.contains("spaas aws") {
                     if let sys = firstMatch(in: cmd, pattern: "--system\\s+([\\S]+)") { awsSet.insert(sanitizeToken(sys)) }
                     if let e = firstMatch(in: cmd, pattern: "--env\\s+([\\S]+)") { envSet.insert(sanitizeToken(e)) }
@@ -796,6 +808,8 @@ class TunnelManager: ObservableObject {
             self.writeLog("Detected envs: \(envList.joined(separator: ", "))")
 
             DispatchQueue.main.async {
+                self.isLoadingShortcuts = false
+                guard !self.isShuttingDown else { return }
                 self.shortcuts = results
                 for s in results { if self.shortcutStates[s.name] == nil { self.shortcutStates[s.name] = .idle } }
                 self.awsSystems = awsList
