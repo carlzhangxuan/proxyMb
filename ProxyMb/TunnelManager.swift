@@ -423,7 +423,10 @@ class TunnelManager: ObservableObject {
         let capture: (FileHandle, LogLevel) -> Void = { [weak self] handle, level in
             handle.readabilityHandler = { fh in
                 let data = fh.availableData
-                if data.isEmpty { return }
+                if data.isEmpty {
+                    fh.readabilityHandler = nil
+                    return
+                }
                 if let s = String(data: data, encoding: .utf8), !s.isEmpty {
                     let line = s.trimmingCharacters(in: .whitespacesAndNewlines)
                     self?.writeLog("[\(level == .stdout ? "stdout" : "stderr")] \(line)")
@@ -465,6 +468,12 @@ class TunnelManager: ObservableObject {
             writeLog("ssh started (pid=\(task.processIdentifier)) for tunnel=\(config.name)")
             appendInMemory(level: .info, "ssh started (pid=\(task.processIdentifier)) for \(config.name)")
         } catch {
+            // Failed launches have no termination callback to release readers.
+            for pipe in [outputPipe, errorPipe] {
+                pipe.fileHandleForReading.readabilityHandler = nil
+                try? pipe.fileHandleForWriting.close()
+            }
+            task.terminationHandler = nil
             let msg = "Failed to launch ssh: \(error.localizedDescription)"
             writeLog(msg)
             appendInMemory(level: .error, msg)
@@ -495,7 +504,10 @@ class TunnelManager: ObservableObject {
         let capture: (FileHandle, LogLevel) -> Void = { [weak self] h, lvl in
             h.readabilityHandler = { fh in
                 let data = fh.availableData
-                if data.isEmpty { return }
+                if data.isEmpty {
+                    fh.readabilityHandler = nil
+                    return
+                }
                 if let s = String(data: data, encoding: .utf8), !s.isEmpty {
                     let line = s.trimmingCharacters(in: .whitespacesAndNewlines)
                     self?.writeLog("[SOCKS \(lvl == .stdout ? "stdout" : "stderr")] \(line)")
@@ -529,6 +541,11 @@ class TunnelManager: ObservableObject {
             refreshStatusFromSystem()
             writeLog("SOCKS ssh started (pid=\(task.processIdentifier))")
         } catch {
+            for pipe in [out, err] {
+                pipe.fileHandleForReading.readabilityHandler = nil
+                try? pipe.fileHandleForWriting.close()
+            }
+            task.terminationHandler = nil
             let msg = "Failed to launch SOCKS ssh: \(error.localizedDescription)"
             writeLog(msg)
             appendInMemory(level: .error, msg)
@@ -742,7 +759,10 @@ class TunnelManager: ObservableObject {
             let capture: (FileHandle, LogLevel) -> Void = { [weak self] fh, lvl in
                 fh.readabilityHandler = { handle in
                     let data = handle.availableData
-                    guard !data.isEmpty else { return }
+                    guard !data.isEmpty else {
+                        handle.readabilityHandler = nil
+                        return
+                    }
                     if let s = String(data: data, encoding: .utf8), !s.isEmpty {
                         let line = s.trimmingCharacters(in: .whitespacesAndNewlines)
                         self?.writeLog("[spaas \(lvl == .stdout ? "stdout" : "stderr")] \(line)")
@@ -774,6 +794,11 @@ class TunnelManager: ObservableObject {
             do {
                 try task.run()
             } catch {
+                for pipe in [outPipe, errPipe] {
+                    pipe.fileHandleForReading.readabilityHandler = nil
+                    try? pipe.fileHandleForWriting.close()
+                }
+                task.terminationHandler = nil
                 let msg = "Failed to launch spaas login: \(error.localizedDescription)"
                 self.writeLog(msg)
                 self.appendInMemory(level: .error, msg)
@@ -956,7 +981,10 @@ class TunnelManager: ObservableObject {
             let capture: (FileHandle, LogLevel) -> Void = { [weak self] fh, lvl in
                 fh.readabilityHandler = { handle in
                     let data = handle.availableData
-                    guard !data.isEmpty else { return }
+                    guard !data.isEmpty else {
+                        handle.readabilityHandler = nil
+                        return
+                    }
                     if let s = String(data: data, encoding: .utf8), !s.isEmpty {
                         let line = s.trimmingCharacters(in: .whitespacesAndNewlines)
                         self?.writeLog("[group \(key) \(lvl == .stdout ? "stdout" : "stderr")] \(line)")
@@ -986,6 +1014,11 @@ class TunnelManager: ObservableObject {
                 try task.run()
                 self.groupProcesses[key] = task
             } catch {
+                for pipe in [out, err] {
+                    pipe.fileHandleForReading.readabilityHandler = nil
+                    try? pipe.fileHandleForWriting.close()
+                }
+                task.terminationHandler = nil
                 let msg = "Failed to launch group \(key): \(error.localizedDescription)"
                 self.writeLog(msg)
                 self.appendInMemory(level: .error, msg)

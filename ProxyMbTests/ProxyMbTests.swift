@@ -207,9 +207,7 @@ final class ProxyMbTests: XCTestCase {
             XCTAssertEqual(stderr.0, "drained")
             complete.fulfill()
         }
-        // CI exceeded the original 15-second budget. Keep the deadlock check
-        // bounded while allowing headroom for hosted-runner I/O and scheduling.
-        await fulfillment(of: [complete], timeout: 60)
+        await fulfillment(of: [complete], timeout: 15)
     }
 
     @MainActor
@@ -585,6 +583,12 @@ final class ProxyMbTests: XCTestCase {
             XCTAssertEqual(manager.groupLastExit[kind], -1)
             XCTAssertNil(manager.groupProcesses[kind])
         }
+        let responsive = expectation(description: "Failed-launch readers must not starve background commands")
+        DispatchQueue.global().async {
+            XCTAssertEqual(TunnelManager.runCommand("/usr/bin/true", []).1, 0)
+            responsive.fulfill()
+        }
+        await fulfillment(of: [responsive], timeout: 5)
     }
 
     @MainActor
