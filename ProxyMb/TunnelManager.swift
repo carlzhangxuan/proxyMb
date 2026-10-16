@@ -16,6 +16,7 @@ class TunnelManager: ObservableObject {
     private let homeDirectory: URL
     private let environment: [String: String]
     private let networkSetupExecutable: String
+    private let lsofExecutable: String
 
     // Logging (file + in-memory)
     enum LogLevel: String { case info, error, stdout, stderr }
@@ -259,10 +260,12 @@ class TunnelManager: ObservableObject {
     init(startRuntime: Bool = true,
          homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
          environment: [String: String] = ProcessInfo.processInfo.environment,
-         networkSetupExecutable: String = "/usr/sbin/networksetup") {
+         networkSetupExecutable: String = "/usr/sbin/networksetup",
+         lsofExecutable: String = "/usr/sbin/lsof") {
         self.homeDirectory = homeDirectory
         self.environment = environment
         self.networkSetupExecutable = networkSetupExecutable
+        self.lsofExecutable = lsofExecutable
         let logDirectory = homeDirectory.appendingPathComponent("Library/Logs/ProxyMb")
         self.logFileURL = logDirectory.appendingPathComponent("ProxyMb.log")
         try? FileManager.default.createDirectory(at: logDirectory, withIntermediateDirectories: true)
@@ -531,7 +534,7 @@ class TunnelManager: ObservableObject {
 
     func pidsListening(onLocalPort port: Int) -> Set<Int32> {
         guard (1...65535).contains(port) else { return [] }
-        let (out, status) = Self.runCommand("/usr/sbin/lsof",
+        let (out, status) = Self.runCommand(lsofExecutable,
                                       ["-nP", "-a", "-iTCP:\(port)", "-sTCP:LISTEN", "-Fpc"])
         guard status == 0 else { return [] }
         return Self.parseSSHListenerPIDs(out)

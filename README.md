@@ -73,8 +73,9 @@ git push -u origin main
 ```
 
 ## Continuous Integration (CI)
-- Triggers: push/PR to `main` or `master`, or manual dispatch.
-- Workflow: `.github/workflows/ci.yml` runs core regression tests and builds an unsigned Release with Xcode on `macos-latest`.
+- `.github/workflows/ci-pr.yml` runs on pushes and pull requests. It runs isolated
+  core regression tests, then builds and tests the Debug app with Xcode on `macos-latest`.
+- `.github/workflows/ci.yml` provides a manual unsigned Release build.
 
 Run the regression suite locally with `swift test`. It uses temporary directories
 and controlled child processes; it does not launch the menu-bar app or change

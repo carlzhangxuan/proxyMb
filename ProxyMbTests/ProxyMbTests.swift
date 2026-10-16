@@ -22,7 +22,7 @@ final class ProxyMbTests: XCTestCase {
     @MainActor
     private func manager(environment: [String: String] = [:]) -> TunnelManager {
         TunnelManager(startRuntime: false, homeDirectory: temporaryHome, environment: environment,
-                      networkSetupExecutable: "/usr/bin/false")
+                      networkSetupExecutable: "/usr/bin/false", lsofExecutable: "/usr/bin/false")
     }
 
     private var repository: URL {
@@ -90,6 +90,27 @@ final class ProxyMbTests: XCTestCase {
         XCTAssertEqual(TunnelManager.parseSSHListenerPIDs("cssh\np30\n"), [])
         XCTAssertEqual(TunnelManager.parseSSHListenerPIDs("102 /usr/bin/ssh -D 10800 tunnel"), [])
         XCTAssertEqual(TunnelManager.parseSSHListenerPIDs("103 /usr/bin/ssh -D 0.0.0.0:1080 tunnel"), [])
+    }
+
+    @MainActor
+    func testListenerProbeSelectsExactPortAndRequiresSuccessfulLookup() async throws {
+        let tool = temporaryHome.appendingPathComponent("lsof")
+        let script = """
+        #!/bin/sh
+        case " $* " in
+          *" -iTCP:1080 "*) printf 'p42\\ncssh\\n' ;;
+          *" -iTCP:10800 "*) printf 'p43\\ncssh\\n' ;;
+          *) printf 'p44\\ncssh\\n'; exit 1 ;;
+        esac
+        """
+        try Data(script.utf8).write(to: tool)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tool.path)
+        let manager = TunnelManager(startRuntime: false, homeDirectory: temporaryHome,
+                                    networkSetupExecutable: "/usr/bin/false", lsofExecutable: tool.path)
+        XCTAssertEqual(manager.pidsListening(onLocalPort: 1080), [42])
+        XCTAssertEqual(manager.pidsListening(onLocalPort: 10800), [43])
+        XCTAssertTrue(manager.pidsListening(onLocalPort: 59991).isEmpty)
+        XCTAssertTrue(manager.pidsListening(onLocalPort: -1).isEmpty)
     }
 
     @MainActor
@@ -303,7 +324,7 @@ final class ProxyMbTests: XCTestCase {
         try Data(script.utf8).write(to: tool)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tool.path)
         let manager = TunnelManager(startRuntime: false, homeDirectory: temporaryHome,
-                                    networkSetupExecutable: tool.path)
+                                    networkSetupExecutable: tool.path, lsofExecutable: "/usr/bin/false")
         manager.stopSocks()
         await drain(manager)
         XCTAssertEqual(try String(contentsOf: trace, encoding: .utf8), "Wi-Fi\nIPv6\n")

@@ -18,6 +18,9 @@ jobs:
           sudo xcode-select -s "/Applications/Xcode.app"
           xcodebuild -version
 
+      - name: Run isolated core regression tests
+        run: swift test
+
       - name: Build and test app (Debug, unsigned)
         shell: bash
         run: |
