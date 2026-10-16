@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build and package ProxyMb (macOS) as an unsigned Release
+# Build ProxyMb and package a verified, ad-hoc signed Release.
 # - Output app: build/Build/Products/Release/ProxyMb.app
 # - Zipped app: dist/ProxyMb-macos.zip
 
@@ -42,10 +42,6 @@ if [[ ! -d "$APP_PATH" ]]; then
   fi
 fi
 
-rm -f "$ZIP_PATH"
-(
-  cd "$PRODUCT_DIR_USED"
-  /usr/bin/zip -ry "$ZIP_PATH" "$APP_NAME" >/dev/null
-)
-
-echo "Packaged: $ZIP_PATH"
+BUILT_APP="$PRODUCT_DIR_USED/$APP_NAME"
+VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$BUILT_APP/Contents/Info.plist")
+bash "$ROOT_DIR/scripts/package_app.sh" "$BUILT_APP" "$ZIP_PATH" "$VERSION"

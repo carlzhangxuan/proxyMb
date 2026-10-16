@@ -31,17 +31,23 @@ jobs:
             build
         shell: bash
 
-      - name: Package app (zip)
+      - name: Sign, package, and verify extracted app startup
         run: |
-          set -e
-          cd build/Build/Products/Release
-          ditto -c -k --sequesterRsrc --keepParent ProxyMb.app ../../../../ProxyMb-macos.zip
+          set -euo pipefail
+          bash scripts/package_app.sh \
+            build/Build/Products/Release/ProxyMb.app \
+            dist/ProxyMb-macos.zip \
+            "${GITHUB_REF_NAME#v}"
         shell: bash
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: ProxyMb-macos.zip
+          files: dist/ProxyMb-macos.zip
           generate_release_notes: true
+          body: |
+            This build is ad-hoc signed, not Developer ID signed or notarized.
+            macOS may require explicit approval in Privacy & Security when opening a downloaded app.
+            Signature integrity, release version, and isolated startup of the extracted ZIP are checked before publication.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

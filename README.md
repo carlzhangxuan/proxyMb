@@ -9,7 +9,7 @@ This repo already includes:
 - GitHub Actions workflows:
   - `CI` (build Release on pushes/PRs to `main`/`master`).
   - `Release` (build and upload a zipped app on tags that start with `v`).
-- A local packaging script: `scripts/build_and_package.sh` to build unsigned Release and zip the app.
+- A local packaging script: `scripts/build_and_package.sh` to build Release, seal a staging copy with an ad-hoc signature, and verify the extracted ZIP before publishing it to `dist/`.
 
 ## Build locally
 
@@ -22,7 +22,9 @@ bash scripts/build_and_package.sh
 # - Zipped app at:      dist/ProxyMb-macos.zip
 ```
 
-Note: The local build and CI builds are unsigned (CODE_SIGNING_ALLOWED=NO). If you plan to distribute to other Macs, consider adding Developer ID signing and notarization (see below).
+The Xcode build disables automatic signing. Packaging then applies a complete **ad-hoc bundle signature**, including the resource seal. This fixes signature integrity but is **not Developer ID signing or Apple notarization**. Downloaded builds may still require explicit per-app approval in macOS Privacy & Security. Do not disable Gatekeeper globally.
+
+Packaging verifies the signature and version after ZIP extraction, then launches the extracted executable with `--smoke-test` and a fresh temporary runtime directory. The startup check creates the real SwiftUI view without loading your configuration, running spaas/SSH, or changing system proxy settings. It is not a test of Gatekeeper approval for a quarantined download.
 
 ## Bundled spaas (no system install required)
 
@@ -34,8 +36,8 @@ How it works:
 
 Include your `spaas` binary:
 - Put your executable at `resources/spaas` (make sure it’s executable and built for your target architecture, e.g. arm64 on Apple Silicon).
-- The packaging script will copy it into the app bundle automatically:
-  - `scripts/build_and_package.sh` copies `resources/spaas` to `Contents/Resources/bin/spaas` and runs `chmod +x` on it.
+- Copy the executable into `ProxyMb.app/Contents/Resources/bin/spaas` before running `scripts/package_app.sh`. The current build script does not copy it automatically.
+- Finish all bundle modifications before signing. Changing resources after signing invalidates the resource seal.
 
 Local Xcode runs:
 - When you run from Xcode, the app bundle produced by Xcode won’t include `resources/spaas` unless you add it to the target’s Copy Bundle Resources. For quick iteration, either:
@@ -74,7 +76,9 @@ git push -u origin main
 
 ## Continuous Integration (CI)
 - `.github/workflows/ci-pr.yml` runs on pushes and pull requests. It runs isolated
-  core regression tests, then builds and tests the Debug app with Xcode on `macos-latest`.
+  core regression tests, builds/tests Debug, and builds Release on `macos-latest`.
+  It then tests packaging, signature failures, version mismatches, and startup failures against the real built app.
+  Only the verified `dist/ProxyMb-macos.zip` is uploaded as a CI artifact.
 - `.github/workflows/ci.yml` provides a manual unsigned Release build.
 
 Run the regression suite locally with `swift test`. It uses temporary directories
@@ -102,32 +106,24 @@ Quit waits for cleanup instead of reloading the app. Only system SOCKS settings
 pointing to this machine's port 1080 are disabled.
 
 ## Create a Release (tag-driven)
-Create a semver-style tag starting with `v` (e.g. `v0.1.0`). The `Release` workflow will:
-- Build a Release (unsigned),
-- Package `ProxyMb.app` into `ProxyMb-macos.zip`,
-- Publish a GitHub Release and upload the zip as an asset.
+Create a semver-style tag starting with `v` matching the app version (e.g. `v0.2.4`). The `Release` workflow will:
+- Build Release with automatic signing disabled.
+- Ad-hoc sign a staging copy of the complete app.
+- Package it into a ZIP, extract it, and verify its signature, exact tag version, and isolated startup.
+- Publish `dist/ProxyMb-macos.zip` only after all checks pass. It never uploads the historical ZIP tracked in the repository root.
 
 ```bash
-# Bump version (optional): update your app version in Xcode if desired
+# Update the app's Debug and Release marketing versions before tagging.
 
 # Create and push tag
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.4
+git push origin v0.2.4
 ```
 
 After a few minutes, check your repo's Releases page; you should see `ProxyMb-macos.zip` attached.
 
-Note about Release workflow:
-- The local packaging script already bundles `resources/spaas` into the app. If your Release workflow doesn’t call the script yet, update it to run `bash scripts/build_and_package.sh` (so the bundled spaas gets included) or add an explicit copy step after `xcodebuild`:
-  ```yaml
-  - name: Bundle spaas
-    run: |
-      APP=build/Build/Products/Release/ProxyMb.app
-      mkdir -p "$APP/Contents/Resources/bin"
-      cp -f resources/spaas "$APP/Contents/Resources/bin/spaas"
-      chmod +x "$APP/Contents/Resources/bin/spaas"
-    shell: bash
-  ```
+Local builds and the Release workflow share `scripts/package_app.sh` and `scripts/verify_app.sh`.
+Run `bash scripts/test_package_app.sh /path/to/built/ProxyMb.app` to exercise the package regression checks.
 
 ## Optional: Codesign + Notarize
 For broader distribution, you should sign and notarize:
@@ -135,7 +131,7 @@ For broader distribution, you should sign and notarize:
 - Export the certificate and keychain password into GitHub Secrets (e.g. `MACOS_CERT_BASE64`, `MACOS_CERT_PASSWORD`, `KEYCHAIN_PASSWORD`).
 - Update the Release workflow to import the certificate, enable signing, and add a notarization step (e.g., `xcrun notarytool`).
 
-This repo uses unsigned builds by default to keep setup simple.
+The current workflow does not import a Developer ID certificate or submit to Apple's notarization service. Do not describe the ad-hoc build as notarized or Gatekeeper-approved.
 
 ## Project
 - Project: `ProxyMb.xcodeproj`
