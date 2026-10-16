@@ -375,7 +375,9 @@ struct TunnelCard: View {
                 Circle().fill(tunnel.isActive ? Color.green : Color.gray).frame(width: 8, height: 8)
                 Text(tunnel.name).font(.subheadline.weight(.semibold))
                 Spacer(minLength: 8)
-                if tunnel.isActive { Button("Stop") { tunnelManager.stopTunnel(for: tunnel.id) }.controlSize(.small).buttonStyle(.bordered) }
+                if !tunnelManager.stoppingPorts.isDisjoint(with: tunnel.localPorts) {
+                    Button("Stopping…") {}.controlSize(.small).buttonStyle(.bordered).disabled(true)
+                } else if tunnel.isActive { Button("Stop") { tunnelManager.stopTunnel(for: tunnel.id) }.controlSize(.small).buttonStyle(.bordered) }
                 else { Button("Start") { tunnelManager.startTunnel(for: tunnel.id) }.controlSize(.small).buttonStyle(.bordered) }
             }
             Divider().opacity(0.12)
@@ -411,7 +413,9 @@ struct SocksCard: View {
                 Circle().fill(tunnelManager.isSocksActive ? Color.green : Color.gray).frame(width: 8, height: 8)
                 Text("SOCKS Proxy (0.0.0.0:1080)").font(.subheadline.weight(.semibold))
                 Spacer(minLength: 8)
-                if tunnelManager.isSocksActive { Button("Stop") { tunnelManager.stopSocks() }.controlSize(.small).buttonStyle(.bordered) }
+                if tunnelManager.stoppingPorts.contains(1080) {
+                    Button("Stopping…") {}.controlSize(.small).buttonStyle(.bordered).disabled(true)
+                } else if tunnelManager.isSocksActive { Button("Stop") { tunnelManager.stopSocks() }.controlSize(.small).buttonStyle(.bordered) }
                 else { Button("Start") { tunnelManager.startSocks() }.controlSize(.small).buttonStyle(.bordered) }
             }
             Divider().opacity(0.12)
