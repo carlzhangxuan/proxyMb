@@ -20,9 +20,10 @@ final class ProxyMbTests: XCTestCase {
     }
 
     @MainActor
-    private func manager(environment: [String: String] = [:]) -> TunnelManager {
+    private func manager(environment: [String: String] = [:],
+                         lsofExecutable: String = "/usr/bin/false") -> TunnelManager {
         TunnelManager(startRuntime: false, homeDirectory: temporaryHome, environment: environment,
-                      networkSetupExecutable: "/usr/bin/false", lsofExecutable: "/usr/bin/false")
+                      networkSetupExecutable: "/usr/bin/false", lsofExecutable: lsofExecutable)
     }
 
     private var repository: URL {
@@ -236,10 +237,334 @@ final class ProxyMbTests: XCTestCase {
         manager.startTunnel(for: tunnel.id)
         let task = try XCTUnwrap(manager.processes[tunnel.id])
         XCTAssertTrue(task.isRunning)
+        XCTAssertFalse(manager.tunnels[0].isActive, "A launched process is not proof of a listening port")
+        XCTAssertEqual(manager.tunnelStatus(for: tunnel), .checking)
+        XCTAssertEqual(manager.portStatus(for: 59991), .checking)
+        XCTAssertTrue(manager.canStopTunnel(tunnel), "A connecting process must remain stoppable")
+        await drain(manager)
+        XCTAssertFalse(manager.tunnels[0].isActive)
+        XCTAssertEqual(manager.portStatus(for: 59991), .notListening)
+        XCTAssertTrue(manager.canStopTunnel(tunnel))
         XCTAssertTrue(manager.pidsListening(onLocalPort: 59991).isEmpty)
         manager.stopAllTunnels()
         await drain(manager)
         XCTAssertFalse(task.isRunning)
+    }
+
+    @MainActor
+    func testSocksLaunchWithoutListenerIsNotActive() async throws {
+        let manager = try fakeSSHManager()
+        manager.startSocks()
+        let task = try XCTUnwrap(manager.socksProcess)
+        XCTAssertTrue(task.isRunning)
+        XCTAssertFalse(manager.isSocksActive, "SOCKS must not turn green before a listener is detected")
+        XCTAssertEqual(manager.socksStatus, .checking)
+        XCTAssertTrue(manager.canStopSocks)
+        await drain(manager)
+        XCTAssertFalse(manager.isSocksActive)
+        XCTAssertEqual(manager.socksStatus, .checking)
+        XCTAssertTrue(manager.canStopSocks)
+        manager.stopSocks()
+        await drain(manager)
+        XCTAssertFalse(task.isRunning)
+        try await waitUntil { manager.socksProcess == nil }
+        XCTAssertFalse(manager.canStopSocks)
+    }
+
+    private func listenerFixture() throws -> URL {
+        let tool = temporaryHome.appendingPathComponent("lsof-fixture")
+        let script = """
+        #!/bin/sh
+        for arg in "$@"; do
+          case "$arg" in
+            -iTCP:*) port="${arg#-iTCP:}" ;;
+          esac
+        done
+        fixture_dir="$(dirname "$0")"
+        printf '%s\\n' "$port" >> "$fixture_dir/probe-trace"
+        record="$fixture_dir/listener-$port"
+        if [ -f "$record" ]; then
+          /bin/cat "$record"
+          if [ -f "$fixture_dir/consume-$port" ]; then /bin/rm "$record"; fi
+          exit 0
+        else
+          exit 1
+        fi
+        """
+        try Data(script.utf8).write(to: tool)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tool.path)
+        return tool
+    }
+
+    @MainActor
+    func testUnavailableMonitorDoesNotClaimAConnectionState() async {
+        let manager = manager(lsofExecutable: "/nonexistent/proxymb-lsof")
+        let tunnel = TunnelConfig(name: "Unavailable probe", localPorts: [15432],
+                                  remoteTargets: ["db.internal:5432"], sshHost: "tunnel")
+        manager.tunnels = [tunnel]
+        manager.refreshStatusFromSystem()
+        await drain(manager)
+        XCTAssertEqual(manager.portStatus(for: 15432), .unknown)
+        XCTAssertEqual(manager.tunnelStatus(for: tunnel), .unknown)
+        XCTAssertEqual(manager.socksStatus, .unknown)
+        XCTAssertFalse(manager.tunnels[0].isActive)
+        XCTAssertFalse(manager.isSocksActive)
+    }
+
+    @MainActor
+    func testMonitorUpdatesEachPortAndAllowsStoppingPartialTunnel() async throws {
+        let tool = try listenerFixture()
+        let manager = manager(lsofExecutable: tool.path)
+        let tunnel = TunnelConfig(name: "Partial forwarding", localPorts: [15432, 16379],
+                                  remoteTargets: ["db.internal:5432", "cache.internal:6379"], sshHost: "tunnel")
+        manager.tunnels = [tunnel]
+        XCTAssertEqual(manager.tunnelStatus(for: tunnel), .unknown)
+        XCTAssertEqual(manager.socksStatus, .unknown)
+        XCTAssertFalse(manager.canStopTunnel(tunnel))
+        for port in [15432, 16379, 1080] {
+            try Data("p424242\ncssh\n".utf8)
+                .write(to: temporaryHome.appendingPathComponent("listener-\(port)"))
+        }
+        manager.refreshStatusFromSystem()
+        await drain(manager)
+        XCTAssertTrue(manager.tunnels[0].isActive)
+        XCTAssertTrue(manager.isSocksActive)
+        XCTAssertEqual(manager.tunnelStatus(for: tunnel), .listening)
+        XCTAssertEqual(manager.socksStatus, .listening)
+        XCTAssertTrue(manager.canStopSocks)
+
+        try FileManager.default.removeItem(at: temporaryHome.appendingPathComponent("listener-16379"))
+        try FileManager.default.removeItem(at: temporaryHome.appendingPathComponent("listener-1080"))
+        manager.refreshStatusFromSystem()
+        await drain(manager)
+        XCTAssertFalse(manager.tunnels[0].isActive)
+        XCTAssertFalse(manager.isSocksActive)
+        XCTAssertEqual(manager.portStatus(for: 15432), .listening)
+        XCTAssertEqual(manager.portStatus(for: 16379), .notListening)
+        XCTAssertEqual(manager.tunnelStatus(for: tunnel), .notListening)
+        XCTAssertTrue(manager.canStopTunnel(tunnel), "A partially listening tunnel still needs a Stop button")
+        XCTAssertEqual(manager.socksStatus, .notListening)
+        XCTAssertFalse(manager.canStopSocks)
+
+        // A non-SSH listener must not turn the tunnel green.
+        try Data("p424242\ncpython3\n".utf8)
+            .write(to: temporaryHome.appendingPathComponent("listener-15432"))
+        manager.refreshStatusFromSystem()
+        await drain(manager)
+        XCTAssertEqual(manager.portStatus(for: 15432), .notListening)
+        XCTAssertFalse(manager.canStopTunnel(tunnel))
+        XCTAssertTrue(PortStatus.listening.description.contains("remote service health is not checked"))
+    }
+
+    @MainActor
+    func testPeriodicMonitorDetectsListenersAppearingAndDisappearing() async throws {
+        let tool = try listenerFixture()
+        let configDirectory = temporaryHome.appendingPathComponent("ProxyMb")
+        try FileManager.default.createDirectory(at: configDirectory, withIntermediateDirectories: true)
+        try config().write(to: configDirectory.appendingPathComponent("config.json"))
+        try Data().write(to: temporaryHome.appendingPathComponent(".zshrc"))
+        let manager = TunnelManager(startRuntime: true, homeDirectory: temporaryHome,
+                                    networkSetupExecutable: "/usr/bin/false", lsofExecutable: tool.path)
+        try await waitUntil { manager.tunnels.count == 1 && manager.portStatus(for: 15432) == .notListening }
+        for port in [15432, 1080] {
+            try Data("p424242\ncssh\n".utf8)
+                .write(to: temporaryHome.appendingPathComponent("listener-\(port)"))
+        }
+        // No manual refresh: the actual repeating timer must update both lights.
+        try await waitUntil { manager.tunnels[0].isActive && manager.isSocksActive }
+        for port in [15432, 1080] {
+            try FileManager.default.removeItem(at: temporaryHome.appendingPathComponent("listener-\(port)"))
+        }
+        try await waitUntil { !manager.tunnels[0].isActive && !manager.isSocksActive }
+        XCTAssertEqual(manager.portStatus(for: 15432), .notListening)
+        let complete = expectation(description: "Stop the monitor after the simulated listeners are gone")
+        manager.cleanupSystemProxyOnExit { complete.fulfill() }
+        await fulfillment(of: [complete], timeout: 5)
+    }
+
+    @MainActor
+    func testMonitorRejectsSnapshotQueuedBeforeTunnelExitAndRetries() async throws {
+        let tool = try listenerFixture()
+        let manager = try fakeSSHManager(lsofExecutable: tool.path)
+        let tunnel = TunnelConfig(name: "Exit race", localPorts: [59991],
+                                  remoteTargets: ["localhost:443"], sshHost: "unused")
+        manager.tunnels = [tunnel]
+        manager.startTunnel(for: tunnel.id)
+        let process = try XCTUnwrap(manager.processes[tunnel.id])
+        await drain(manager)
+        let trace = temporaryHome.appendingPathComponent("probe-trace")
+        try Data().write(to: trace)
+
+        // Hold the worker before a snapshot; termination callbacks still run on main.
+        let gate = DispatchSemaphore(value: 0)
+        manager.systemQueue.async { _ = gate.wait(timeout: .now() + 5) }
+        defer { gate.signal() }
+        manager.refreshStatusFromSystem()
+        process.terminate()
+        try await waitUntil { manager.processes[tunnel.id] == nil }
+        XCTAssertFalse(manager.tunnels[0].isActive)
+
+        // The first probe returns a stale listener, then the retry sees it gone.
+        try Data("p424242\ncssh\n".utf8)
+            .write(to: temporaryHome.appendingPathComponent("listener-59991"))
+        try Data().write(to: temporaryHome.appendingPathComponent("consume-59991"))
+        gate.signal()
+        await drain(manager)
+        await drain(manager)
+        XCTAssertFalse(manager.tunnels[0].isActive, "A pre-exit snapshot must never resurrect green")
+        XCTAssertEqual(manager.portStatus(for: 59991), .notListening)
+        let probes = try String(contentsOf: trace, encoding: .utf8).split(separator: "\n")
+        XCTAssertEqual(probes.filter { $0 == "59991" }.count, 2, "Discarded snapshots must retry immediately")
+    }
+
+    @MainActor
+    private func fakeSpaasManager() throws -> TunnelManager {
+        let executable = temporaryHome.appendingPathComponent("spaas")
+        let script = """
+        #!/bin/sh
+        fixture_dir="$(dirname "$0")"
+        printf '%s\\n' "$@" > "$fixture_dir/arguments-$1"
+        while [ ! -f "$fixture_dir/finish-$1" ]; do /bin/sleep 0.02; done
+        printf 'Login completed successfully\\n'
+        exit "$(/bin/cat "$fixture_dir/finish-$1")"
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let manager = manager(environment: ["PATH": temporaryHome.path + ":/usr/bin:/bin"])
+        XCTAssertEqual(manager.resolveSpaasURL(), executable, "Tests must never execute a real spaas binary")
+        return manager
+    }
+
+    @MainActor
+    func testSpaasLoginIndicatorsFollowExitStatusAndIgnoreOldCallbacks() async throws {
+        let manager = try fakeSpaasManager()
+        XCTAssertEqual(manager.spaasState, .idle)
+        manager.spaasLogin()
+        try await waitUntil { manager.spaasState == .running }
+        let first = try XCTUnwrap(manager.spaasProcess)
+        defer { if first.isRunning { first.terminate() } }
+        let oldExit = try XCTUnwrap(first.terminationHandler)
+        XCTAssertNil(manager.spaasLastExitStatus)
+        let finish = temporaryHome.appendingPathComponent("finish-login")
+        try Data("0".utf8).write(to: finish)
+        try await waitUntil { manager.spaasState == .success }
+        XCTAssertEqual(manager.spaasLastExitStatus, 0)
+        XCTAssertNotNil(manager.spaasLastRunAt)
+
+        try FileManager.default.removeItem(at: finish)
+        manager.spaasLogin()
+        try await waitUntil { manager.spaasState == .running }
+        let second = try XCTUnwrap(manager.spaasProcess)
+        defer { if second.isRunning { second.terminate() } }
+        XCTAssertFalse(first === second)
+        XCTAssertNil(manager.spaasLastExitStatus, "A new command must not display the previous exit code")
+        oldExit(first)
+        await drain(manager)
+        XCTAssertTrue(manager.spaasProcess === second)
+        XCTAssertEqual(manager.spaasState, .running)
+        try Data("7".utf8).write(to: finish)
+        try await waitUntil { manager.spaasState == .failure }
+        XCTAssertEqual(manager.spaasLastExitStatus, 7, "Success-looking output is not a successful exit")
+    }
+
+    @MainActor
+    func testAWSAndKubernetesIndicatorsAreScopedToSelectionAndCommand() async throws {
+        let manager = try fakeSpaasManager()
+        manager.k8sContextBySystem = ["content-ml": "common-0", "sn-feed": "common-0"]
+        for kind in ["aws", "kubernetes"] {
+            XCTAssertEqual(manager.groupStatus(kind: kind, system: "content-ml", env: "prd"), .idle)
+            manager.runGroup(kind: kind, system: "content-ml", env: "prd")
+            try await waitUntil { manager.groupProcesses[kind] != nil }
+            let first = try XCTUnwrap(manager.groupProcesses[kind])
+            defer { if first.isRunning { first.terminate() } }
+            let oldExit = try XCTUnwrap(first.terminationHandler)
+            XCTAssertEqual(manager.groupStatus(kind: kind, system: "content-ml", env: "prd"), .running)
+            XCTAssertNil(manager.groupLastExit[kind])
+            let finish = temporaryHome.appendingPathComponent("finish-\(kind)")
+            try Data("0".utf8).write(to: finish)
+            try await waitUntil { manager.groupState[kind] == .success }
+            XCTAssertEqual(manager.groupStatus(kind: kind, system: "content-ml", env: "prd"), .success)
+            XCTAssertEqual(manager.groupLastExit[kind], 0)
+            XCTAssertEqual(manager.groupStatus(kind: kind, system: "sn-feed", env: "prd"), .idle)
+            XCTAssertEqual(manager.groupStatus(kind: kind, system: "content-ml", env: "dev"), .idle)
+            if kind == "kubernetes" {
+                manager.k8sContextBySystem["content-ml"] = "common-1"
+                XCTAssertEqual(manager.groupStatus(kind: kind, system: "content-ml", env: "prd"), .idle)
+                manager.k8sContextBySystem["content-ml"] = "common-0"
+            }
+
+            try FileManager.default.removeItem(at: finish)
+            manager.runGroup(kind: kind, system: "sn-feed", env: "prd")
+            try await waitUntil { manager.groupProcesses[kind] != nil }
+            let second = try XCTUnwrap(manager.groupProcesses[kind])
+            defer { if second.isRunning { second.terminate() } }
+            XCTAssertNil(manager.groupLastExit[kind])
+            oldExit(first)
+            await drain(manager)
+            XCTAssertTrue(manager.groupProcesses[kind] === second)
+            XCTAssertEqual(manager.groupStatus(kind: kind, system: "sn-feed", env: "prd"), .running)
+            XCTAssertEqual(manager.groupStatus(kind: kind, system: "content-ml", env: "prd"), .idle)
+            try Data("7".utf8).write(to: finish)
+            try await waitUntil { manager.groupState[kind] == .failure }
+            XCTAssertEqual(manager.groupStatus(kind: kind, system: "sn-feed", env: "prd"), .failure)
+            XCTAssertEqual(manager.groupLastExit[kind], 7)
+            let arguments = try String(contentsOf: temporaryHome.appendingPathComponent("arguments-\(kind)"),
+                                       encoding: .utf8).split(separator: "\n").map(String.init)
+            let expected = kind == "aws"
+                ? ["aws", "configure", "--system", "sn-feed", "--env", "prd"]
+                : ["kubernetes", "configure", "-s", "sn-feed", "-C", "common-0", "-A", "prd"]
+            XCTAssertEqual(arguments, expected)
+        }
+        XCTAssertTrue(TunnelManager.SpaasState.success.description.contains("credentials"))
+        XCTAssertEqual(TunnelManager.SpaasState.idle.color, .gray)
+        XCTAssertEqual(TunnelManager.SpaasState.running.color, .orange)
+        XCTAssertEqual(TunnelManager.SpaasState.success.color, .green)
+        XCTAssertEqual(TunnelManager.SpaasState.failure.color, .red)
+    }
+
+    @MainActor
+    func testRefreshClearsAllCommandIndicatorsAndIgnoresTheirOldCallbacks() async throws {
+        let manager = try fakeSpaasManager()
+        manager.spaasLogin()
+        manager.runGroup(kind: "aws", system: "content-ml", env: "prd")
+        manager.runGroup(kind: "kubernetes", system: "content-ml", env: "prd")
+        try await waitUntil { manager.spaasProcess != nil && manager.groupProcesses.count == 2 }
+        let tasks = [try XCTUnwrap(manager.spaasProcess)] + Array(manager.groupProcesses.values)
+        let callbacks = try tasks.map { try XCTUnwrap($0.terminationHandler) }
+        manager.refreshAll()
+        try await waitUntil {
+            manager.spaasState == .idle && manager.groupState.values.allSatisfy { $0 == .idle }
+                && tasks.allSatisfy { !$0.isRunning }
+        }
+        for (task, callback) in zip(tasks, callbacks) { callback(task) }
+        await drain(manager)
+        XCTAssertEqual(manager.spaasState, .idle)
+        XCTAssertNil(manager.spaasLastExitStatus)
+        for kind in ["aws", "kubernetes"] {
+            XCTAssertEqual(manager.groupStatus(kind: kind, system: "content-ml", env: "prd"), .idle)
+            XCTAssertNil(manager.groupLastExit[kind])
+        }
+        let complete = expectation(description: "Stop the timer started by Refresh")
+        manager.cleanupSystemProxyOnExit { complete.fulfill() }
+        await fulfillment(of: [complete], timeout: 5)
+    }
+
+    @MainActor
+    func testCommandLaunchFailuresNeverLeaveOrangeOrGreenIndicators() async throws {
+        let manager = try fakeSpaasManager()
+        // An executable file with an invalid binary format fails Process.run().
+        try Data([0xFF, 0xFF, 0xFF]).write(to: temporaryHome.appendingPathComponent("spaas"))
+        manager.spaasLogin()
+        try await waitUntil { manager.spaasState == .failure }
+        XCTAssertEqual(manager.spaasLastExitStatus, -1)
+        XCTAssertNil(manager.spaasProcess)
+        for kind in ["aws", "kubernetes"] {
+            manager.runGroup(kind: kind, system: "content-ml", env: "prd")
+            try await waitUntil { manager.groupState[kind] == .failure }
+            XCTAssertEqual(manager.groupStatus(kind: kind, system: "content-ml", env: "prd"), .failure)
+            XCTAssertEqual(manager.groupLastExit[kind], -1)
+            XCTAssertNil(manager.groupProcesses[kind])
+        }
     }
 
     @MainActor
@@ -342,13 +667,13 @@ final class ProxyMbTests: XCTestCase {
     }
 
     @MainActor
-    private func fakeSSHManager() throws -> TunnelManager {
+    private func fakeSSHManager(lsofExecutable: String = "/usr/bin/false") throws -> TunnelManager {
         let bin = temporaryHome.appendingPathComponent("bin")
         try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
         let ssh = bin.appendingPathComponent("ssh")
         try Data("#!/bin/sh\nexec /bin/sleep 30\n".utf8).write(to: ssh)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: ssh.path)
-        return manager(environment: ["PATH": bin.path + ":/usr/bin:/bin"])
+        return manager(environment: ["PATH": bin.path + ":/usr/bin:/bin"], lsofExecutable: lsofExecutable)
     }
 
     @MainActor

@@ -96,6 +96,14 @@ struct ContentView: View {
         }
     }
 
+    private var awsState: TunnelManager.SpaasState {
+        tunnelManager.groupStatus(kind: "aws", system: selectedAwsSystem, env: selectedAwsEnv)
+    }
+
+    private var kubernetesState: TunnelManager.SpaasState {
+        tunnelManager.groupStatus(kind: "kubernetes", system: selectedK8sSystem, env: selectedK8sEnv)
+    }
+
     private var shortcutCards: some View {
             LazyVStack(alignment: .leading, spacing: 10) {
                 shortcutLoadNotice
@@ -103,8 +111,9 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 10) {
                         Circle()
-                            .fill((tunnelManager.groupState["aws"] ?? .idle) == .running ? Color.orange : (tunnelManager.groupState["aws"] == .success ? Color.green : (tunnelManager.groupState["aws"] == .failure ? Color.red : Color.gray)))
+                            .fill(awsState.color)
                             .frame(width: 8, height: 8)
+                            .help(awsState.description)
                         Text("AWS").font(.subheadline.weight(.semibold))
                         Spacer(minLength: 8)
                         if (tunnelManager.groupState["aws"] ?? .idle) == .running {
@@ -130,6 +139,7 @@ struct ContentView: View {
                                 }
                                 .pickerStyle(.menu)
                                 .frame(maxWidth: 220)
+                                .disabled(tunnelManager.groupState["aws"] == .running)
                             }
                             if tunnelManager.foundEnvs.isEmpty {
                                 Text("No envs found").font(.caption).foregroundStyle(.secondary)
@@ -139,18 +149,19 @@ struct ContentView: View {
                                 }
                                 .pickerStyle(.menu)
                                 .frame(maxWidth: 120)
+                                .disabled(tunnelManager.groupState["aws"] == .running)
                             }
                             Spacer()
                         }
                         HStack(spacing: 8) {
                             Image(systemName: "clock").foregroundStyle(.secondary)
                             VStack(alignment: .leading, spacing: 2) {
-                                if let d = tunnelManager.groupLastRunAt["aws"] {
+                                if awsState != .idle, let d = tunnelManager.groupLastRunAt["aws"] {
                                     Text("Last: \(d, formatter: dateFormatterSmall)").font(.caption2).foregroundStyle(.secondary)
                                 } else {
-                                    Text("Never run").font(.caption2).foregroundStyle(.secondary)
+                                    Text("No result for selection").font(.caption2).foregroundStyle(.secondary)
                                 }
-                                if let code = tunnelManager.groupLastExit["aws"] {
+                                if awsState != .idle, let code = tunnelManager.groupLastExit["aws"] {
                                     Text("Exit: \(code)").font(.caption2).foregroundStyle(.secondary)
                                 }
                             }
@@ -167,8 +178,9 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 10) {
                         Circle()
-                            .fill((tunnelManager.groupState["kubernetes"] ?? .idle) == .running ? Color.orange : (tunnelManager.groupState["kubernetes"] == .success ? Color.green : (tunnelManager.groupState["kubernetes"] == .failure ? Color.red : Color.gray)))
+                            .fill(kubernetesState.color)
                             .frame(width: 8, height: 8)
+                            .help(kubernetesState.description)
                         Text("Kubernetes").font(.subheadline.weight(.semibold))
                         Spacer(minLength: 8)
                         if (tunnelManager.groupState["kubernetes"] ?? .idle) == .running {
@@ -194,6 +206,7 @@ struct ContentView: View {
                                 }
                                 .pickerStyle(.menu)
                                 .frame(maxWidth: 220)
+                                .disabled(tunnelManager.groupState["kubernetes"] == .running)
                             }
                             if tunnelManager.foundEnvs.isEmpty {
                                 Text("No envs found").font(.caption).foregroundStyle(.secondary)
@@ -203,18 +216,19 @@ struct ContentView: View {
                                 }
                                 .pickerStyle(.menu)
                                 .frame(maxWidth: 120)
+                                .disabled(tunnelManager.groupState["kubernetes"] == .running)
                             }
                             Spacer()
                         }
                         HStack(spacing: 8) {
                             Image(systemName: "clock").foregroundStyle(.secondary)
                             VStack(alignment: .leading, spacing: 2) {
-                                if let d = tunnelManager.groupLastRunAt["kubernetes"] {
+                                if kubernetesState != .idle, let d = tunnelManager.groupLastRunAt["kubernetes"] {
                                     Text("Last: \(d, formatter: dateFormatterSmall)").font(.caption2).foregroundStyle(.secondary)
                                 } else {
-                                    Text("Never run").font(.caption2).foregroundStyle(.secondary)
+                                    Text("No result for selection").font(.caption2).foregroundStyle(.secondary)
                                 }
-                                if let code = tunnelManager.groupLastExit["kubernetes"] {
+                                if kubernetesState != .idle, let code = tunnelManager.groupLastExit["kubernetes"] {
                                     Text("Exit: \(code)").font(.caption2).foregroundStyle(.secondary)
                                 }
                             }
@@ -417,12 +431,13 @@ struct TunnelCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
-                Circle().fill(tunnel.isActive ? Color.green : Color.gray).frame(width: 8, height: 8)
+                Circle().fill(tunnelManager.tunnelStatus(for: tunnel).color).frame(width: 8, height: 8)
+                    .help(tunnelManager.tunnelStatus(for: tunnel).description)
                 Text(tunnel.name).font(.subheadline.weight(.semibold))
                 Spacer(minLength: 8)
                 if !tunnelManager.stoppingPorts.isDisjoint(with: tunnel.localPorts) {
                     Button("Stopping…") {}.controlSize(.small).buttonStyle(.bordered).disabled(true)
-                } else if tunnel.isActive { Button("Stop") { tunnelManager.stopTunnel(for: tunnel.id) }.controlSize(.small).buttonStyle(.bordered) }
+                } else if tunnelManager.canStopTunnel(tunnel) { Button("Stop") { tunnelManager.stopTunnel(for: tunnel.id) }.controlSize(.small).buttonStyle(.bordered) }
                 else { Button("Start") { tunnelManager.startTunnel(for: tunnel.id) }.controlSize(.small).buttonStyle(.bordered) }
             }
             Divider().opacity(0.12)
@@ -431,8 +446,9 @@ struct TunnelCard: View {
                     let lp = tunnel.localPorts[idx]
                     let target = tunnel.remoteTargets[idx]
                     HStack(spacing: 8) {
-                        let status = tunnel.isActive ? tunnelManager.portStatus(for: lp) : .unknown
+                        let status = tunnelManager.portStatus(for: lp)
                         Image(systemName: status.symbol).foregroundStyle(status.color)
+                            .help(status.description)
                         Text("localhost:\(portString(lp)) → \(target) via \(tunnel.sshHost)")
                             .font(.caption).foregroundStyle(.secondary)
                             .lineLimit(1).truncationMode(.middle)
@@ -455,12 +471,13 @@ struct SocksCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
-                Circle().fill(tunnelManager.isSocksActive ? Color.green : Color.gray).frame(width: 8, height: 8)
+                Circle().fill(tunnelManager.socksStatus.color).frame(width: 8, height: 8)
+                    .help(tunnelManager.socksStatus.description)
                 Text("SOCKS Proxy (0.0.0.0:1080)").font(.subheadline.weight(.semibold))
                 Spacer(minLength: 8)
                 if tunnelManager.stoppingPorts.contains(1080) {
                     Button("Stopping…") {}.controlSize(.small).buttonStyle(.bordered).disabled(true)
-                } else if tunnelManager.isSocksActive { Button("Stop") { tunnelManager.stopSocks() }.controlSize(.small).buttonStyle(.bordered) }
+                } else if tunnelManager.canStopSocks { Button("Stop") { tunnelManager.stopSocks() }.controlSize(.small).buttonStyle(.bordered) }
                 else { Button("Start") { tunnelManager.startSocks() }.controlSize(.small).buttonStyle(.bordered) }
             }
             Divider().opacity(0.12)
@@ -482,9 +499,6 @@ struct SpaasLoginCard: View {
     @EnvironmentObject var tunnelManager: TunnelManager
     @State private var isPresentingSpaasPanel: Bool = false
 
-    private func stateColor() -> Color {
-        switch tunnelManager.spaasState { case .idle: return .gray; case .running: return .orange; case .success: return .green; case .failure: return .red }
-    }
     private func stateText() -> String {
         switch tunnelManager.spaasState { case .idle: return "Idle"; case .running: return "Running"; case .success: return "Last run success"; case .failure: return "Last run failed" }
     }
@@ -492,7 +506,8 @@ struct SpaasLoginCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
-                Circle().fill(stateColor()).frame(width: 8, height: 8)
+                Circle().fill(tunnelManager.spaasState.color).frame(width: 8, height: 8)
+                    .help(tunnelManager.spaasState.description)
                 Text("spaas login").font(.subheadline.weight(.semibold))
                 Spacer(minLength: 8)
                 Button("Load spaas…") { pickSpaas() }

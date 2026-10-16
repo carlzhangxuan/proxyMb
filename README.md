@@ -90,6 +90,14 @@ configuration in place.
 
 Stopping waits for the tracked processes before allowing another start. External
 SSH tunnels are detected from actual TCP listeners, not command-line text.
+
+Status indicators do not change the existing layout:
+
+- Tunnel, SOCKS, and per-port lights use observed local SSH listeners, not merely a started process. Orange means waiting/stopping, green means listening, red means no listener, and gray means not checked or unavailable.
+- A process that is still connecting and a partially listening tunnel both keep a usable **Stop** button. Individual port results remain visible even when the whole tunnel is not active.
+- Monitoring runs every three seconds; exits invalidate older observations and trigger a fresh check. Green does not prove that the remote application behind the tunnel is healthy.
+- AWS/Kubernetes command results belong to the selected system, environment, and Kubernetes context. Switching selections does not inherit another command's green light; a new run clears the previous exit code.
+- spaas login, AWS, and Kubernetes lights indicate the last command's exit result, not live credential validity or cluster health. Hover over a light for its meaning. Success-looking log text does not override a failing exit code.
 Quit waits for cleanup instead of reloading the app. Only system SOCKS settings
 pointing to this machine's port 1080 are disabled.
 
