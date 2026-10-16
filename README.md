@@ -90,6 +90,14 @@ configuration in place.
 
 Stopping waits for the tracked processes before allowing another start. External
 SSH tunnels are detected from actual TCP listeners, not command-line text.
+
+Status indicators do not change the existing layout:
+
+- Tunnel, SOCKS, and per-port lights use observed local SSH listeners, not merely a started process. Orange means waiting/stopping, green means listening, red means no listener, and gray means not checked or unavailable.
+- A process that is still connecting and a partially listening tunnel both keep a usable **Stop** button. Individual port results remain visible even when the whole tunnel is not active.
+- Monitoring runs every three seconds; exits invalidate older observations and trigger a fresh check. Green does not prove that the remote application behind the tunnel is healthy.
+- AWS/Kubernetes command results belong to the selected system, environment, and Kubernetes context. Switching selections does not inherit another command's green light; a new run clears the previous exit code.
+- spaas login, AWS, and Kubernetes lights indicate the last command's exit result, not live credential validity or cluster health. Hover over a light for its meaning. Success-looking log text does not override a failing exit code.
 Quit waits for cleanup instead of reloading the app. Only system SOCKS settings
 pointing to this machine's port 1080 are disabled.
 
@@ -135,6 +143,13 @@ This repo uses unsigned builds by default to keep setup simple.
 - App target: `ProxyMb` (macOS)
 
 ## Troubleshooting
+
+- The app version is shown beside **Tunnels** at the top and in the existing footer.
+- **Short Cuts** remains below the tunnel list and is collapsed by default. Scroll down and expand it to access AWS and Kubernetes.
+- Shortcuts are read directly from single-line aliases in `~/.zshrc` whenever the menu content appears. The section header shows the number of detected AWS and Kubernetes systems.
+- Use **Reload** beside **Short Cuts** to reread aliases without stopping tunnels or SOCKS. The top-level **Refresh** still resets runtime state and stops connections.
+- Read errors are shown in **Short Cuts**; previously loaded choices are retained until a successful reload. No shell startup file is executed during loading.
+
 - If the GitHub runner picks a wrong Xcode, the workflow pins to `/Applications/Xcode.app`.
 - If the build fails due to signing, confirm `CODE_SIGNING_ALLOWED=NO` is present.
 - For local packaging script, ensure it’s executable:

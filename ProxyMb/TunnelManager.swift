@@ -7,7 +7,7 @@ class TunnelManager: ObservableObject {
     @Published var tunnels: [TunnelConfig] = []
     @Published private(set) var stoppingPorts: Set<Int> = []
 
-    private(set) var processes: [UUID: Process] = [:]
+    @Published private(set) var processes: [UUID: Process] = [:]
     let systemQueue = DispatchQueue(label: "ProxyMb.System", qos: .utility)
     private var statusGeneration = 0
     private var statusRefreshInFlight = false
@@ -217,7 +217,7 @@ class TunnelManager: ObservableObject {
 
     // Fixed SOCKS proxy (hardcoded): ssh -ND 0.0.0.0:1080 tunnel
     @Published var isSocksActive: Bool = false
-    private(set) var socksProcess: Process?
+    @Published private(set) var socksProcess: Process?
     private let socksPort: Int = 1080
     private let socksBind: String = "0.0.0.0:1080"
     private let socksHost: String = "tunnel"
@@ -227,7 +227,7 @@ class TunnelManager: ObservableObject {
     @Published var spaasState: SpaasState = .idle
     @Published var spaasLastExitStatus: Int? = nil
     @Published var spaasLastRunAt: Date? = nil
-    private var spaasProcess: Process? = nil
+    private(set) var spaasProcess: Process? = nil
 
     // Shortcuts (parsed from ~/.zshrc aliases)
     struct Shortcut: Identifiable, Equatable {
@@ -236,6 +236,9 @@ class TunnelManager: ObservableObject {
         let command: String
     }
     @Published var shortcuts: [Shortcut] = []
+    @Published private(set) var isLoadingShortcuts = false
+    @Published private(set) var shortcutLoadError: String?
+    var shortcutSourcePath: String { homeDir().appendingPathComponent(".zshrc").path }
     // Track per-shortcut state and last run info keyed by shortcut name
     @Published var shortcutStates: [String: SpaasState] = [:]
     @Published var shortcutLastExit: [String: Int] = [:]
@@ -252,10 +255,16 @@ class TunnelManager: ObservableObject {
     @Published var groupState: [String: SpaasState] = ["aws": .idle, "kubernetes": .idle]
     @Published var groupLastExit: [String: Int] = [:]
     @Published var groupLastRunAt: [String: Date] = [:]
-    private var groupProcesses: [String: Process] = [:]
+    private(set) var groupProcesses: [String: Process] = [:]
+    struct GroupSelection: Equatable {
+        let system: String
+        let environment: String
+        let context: String?
+    }
+    @Published private var groupSelections: [String: GroupSelection] = [:]
 
     // Per-port listening cache used by UI portStatus
-    private var portListeningCache: [Int: Bool] = [:]
+    @Published private var portListeningCache: [Int: Bool] = [:]
 
     init(startRuntime: Bool = true,
          homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
@@ -283,6 +292,9 @@ class TunnelManager: ObservableObject {
     deinit {
         stopStatusMonitor()
         stopLogFlushTimer()
+        // File writes capture the URL, not self, so they must finish before
+        // the manager's log directory can be safely disposed of.
+        logQueue.sync {}
     }
 
     // Start periodic monitoring to auto-detect externally-started tunnels
@@ -299,8 +311,9 @@ class TunnelManager: ObservableObject {
     }
 
     private func stopStatusMonitor() {
-        statusTimer?.setEventHandler(handler: nil)
-        statusTimer?.cancel()
+        guard let timer = statusTimer else { return }
+        timer.setEventHandler(handler: nil)
+        timer.cancel()
         statusTimer = nil
         writeLog("Stopped status monitor")
     }
@@ -337,6 +350,7 @@ class TunnelManager: ObservableObject {
             self.groupState["kubernetes"] = .idle
             self.groupLastExit.removeAll()
             self.groupLastRunAt.removeAll()
+            self.groupSelections.removeAll()
 
             self.shortcuts.removeAll()
             self.awsSystems.removeAll()
@@ -409,7 +423,10 @@ class TunnelManager: ObservableObject {
         let capture: (FileHandle, LogLevel) -> Void = { [weak self] handle, level in
             handle.readabilityHandler = { fh in
                 let data = fh.availableData
-                if data.isEmpty { return }
+                if data.isEmpty {
+                    fh.readabilityHandler = nil
+                    return
+                }
                 if let s = String(data: data, encoding: .utf8), !s.isEmpty {
                     let line = s.trimmingCharacters(in: .whitespacesAndNewlines)
                     self?.writeLog("[\(level == .stdout ? "stdout" : "stderr")] \(line)")
@@ -428,21 +445,35 @@ class TunnelManager: ObservableObject {
             self?.writeLog("ssh exited with status \(status)")
             self?.appendInMemory(level: status == 0 ? .info : .error, "ssh exited with status \(status)")
             DispatchQueue.main.async {
-                guard self?.processes[tunnelID] === proc else { return }
-                self?.processes[tunnelID] = nil
-                if let idx = self?.tunnels.firstIndex(where: { $0.id == tunnelID }) {
-                    self?.tunnels[idx].isActive = false
+                guard let self = self, self.processes[tunnelID] === proc else { return }
+                self.statusGeneration += 1
+                self.processes[tunnelID] = nil
+                for port in config.localPorts {
+                    self.portListeningCache[port] = false
+                    self.listenerPIDs[port] = nil
                 }
+                if let idx = self.tunnels.firstIndex(where: { $0.id == tunnelID }) {
+                    self.tunnels[idx].isActive = false
+                }
+                self.refreshStatusFromSystem()
             }
         }
 
         do {
             try task.run()
             processes[tunnelID] = task
-            tunnels[index].isActive = true
+            for port in config.localPorts { portListeningCache[port] = nil }
+            tunnels[index].isActive = false
+            refreshStatusFromSystem()
             writeLog("ssh started (pid=\(task.processIdentifier)) for tunnel=\(config.name)")
             appendInMemory(level: .info, "ssh started (pid=\(task.processIdentifier)) for \(config.name)")
         } catch {
+            // Failed launches have no termination callback to release readers.
+            for pipe in [outputPipe, errorPipe] {
+                pipe.fileHandleForReading.readabilityHandler = nil
+                try? pipe.fileHandleForWriting.close()
+            }
+            task.terminationHandler = nil
             let msg = "Failed to launch ssh: \(error.localizedDescription)"
             writeLog(msg)
             appendInMemory(level: .error, msg)
@@ -473,7 +504,10 @@ class TunnelManager: ObservableObject {
         let capture: (FileHandle, LogLevel) -> Void = { [weak self] h, lvl in
             h.readabilityHandler = { fh in
                 let data = fh.availableData
-                if data.isEmpty { return }
+                if data.isEmpty {
+                    fh.readabilityHandler = nil
+                    return
+                }
                 if let s = String(data: data, encoding: .utf8), !s.isEmpty {
                     let line = s.trimmingCharacters(in: .whitespacesAndNewlines)
                     self?.writeLog("[SOCKS \(lvl == .stdout ? "stdout" : "stderr")] \(line)")
@@ -489,18 +523,29 @@ class TunnelManager: ObservableObject {
             err.fileHandleForReading.readabilityHandler = nil
             self?.writeLog("SOCKS ssh exited with status \(p.terminationStatus)")
             DispatchQueue.main.async {
-                guard self?.socksProcess === p else { return }
-                self?.socksProcess = nil
-                self?.isSocksActive = false
+                guard let self = self, self.socksProcess === p else { return }
+                self.statusGeneration += 1
+                self.socksProcess = nil
+                self.isSocksActive = false
+                self.portListeningCache[self.socksPort] = false
+                self.listenerPIDs[self.socksPort] = nil
+                self.refreshStatusFromSystem()
             }
         }
 
         do {
             try task.run()
             socksProcess = task
-            isSocksActive = true
+            portListeningCache[socksPort] = nil
+            isSocksActive = false
+            refreshStatusFromSystem()
             writeLog("SOCKS ssh started (pid=\(task.processIdentifier))")
         } catch {
+            for pipe in [out, err] {
+                pipe.fileHandleForReading.readabilityHandler = nil
+                try? pipe.fileHandleForWriting.close()
+            }
+            task.terminationHandler = nil
             let msg = "Failed to launch SOCKS ssh: \(error.localizedDescription)"
             writeLog(msg)
             appendInMemory(level: .error, msg)
@@ -533,10 +578,16 @@ class TunnelManager: ObservableObject {
     }
 
     func pidsListening(onLocalPort port: Int) -> Set<Int32> {
-        guard (1...65535).contains(port) else { return [] }
+        probeListenerPIDs(onLocalPort: port) ?? []
+    }
+
+    private func probeListenerPIDs(onLocalPort port: Int) -> Set<Int32>? {
+        guard (1...65535).contains(port) else { return nil }
         let (out, status) = Self.runCommand(lsofExecutable,
                                       ["-nP", "-a", "-iTCP:\(port)", "-sTCP:LISTEN", "-Fpc"])
-        guard status == 0 else { return [] }
+        // lsof exits 1 with no output when the port has no matching listener.
+        if status == 1, out.isEmpty { return [] }
+        guard status == 0 else { return nil }
         return Self.parseSSHListenerPIDs(out)
     }
 
@@ -580,6 +631,10 @@ class TunnelManager: ObservableObject {
         // Capture identities now. Never discover new kill targets after Stop.
         let observed = ports.reduce(into: Set<Int32>()) { $0.formUnion(listenerPIDs[$1] ?? []) }
         let ownedPIDs = Set(owned.map(\.processIdentifier))
+        for port in ports {
+            portListeningCache[port] = false
+            listenerPIDs[port] = nil
+        }
         systemQueue.async {
             self.terminateOwnedProcesses(owned)
             let external = observed.subtracting(ownedPIDs)
@@ -611,20 +666,24 @@ class TunnelManager: ObservableObject {
             for t in snapshot { allPorts.formUnion(t.localPorts) }
             allPorts.insert(self.socksPort)
             for p in allPorts {
-                let pids = self.pidsListening(onLocalPort: p)
+                guard let pids = self.probeListenerPIDs(onLocalPort: p) else { continue }
                 newListenerPIDs[p] = pids
                 let listening = !pids.isEmpty
                 newPortCache[p] = listening
             }
             // Derive tunnel active from per-port cache
             for t in snapshot {
-                let allListening = t.localPorts.allSatisfy { newPortCache[$0] == true }
+                let allListening = !t.localPorts.isEmpty && t.localPorts.allSatisfy { newPortCache[$0] == true }
                 statusByID[t.id] = allListening
             }
             let socksActive = (newPortCache[self.socksPort] == true)
             DispatchQueue.main.async {
                 self.statusRefreshInFlight = false
-                guard !self.isShuttingDown, generation == self.statusGeneration else { return }
+                guard !self.isShuttingDown else { return }
+                guard generation == self.statusGeneration else {
+                    self.refreshStatusFromSystem()
+                    return
+                }
                 self.listenerPIDs = newListenerPIDs
                 self.portListeningCache = newPortCache
                 for i in self.tunnels.indices {
@@ -688,6 +747,7 @@ class TunnelManager: ObservableObject {
             task.standardError = errPipe
 
             self.spaasState = .running
+            self.spaasLastExitStatus = nil
             self.spaasLastRunAt = Date()
             self.spaasProcess = task
 
@@ -699,7 +759,10 @@ class TunnelManager: ObservableObject {
             let capture: (FileHandle, LogLevel) -> Void = { [weak self] fh, lvl in
                 fh.readabilityHandler = { handle in
                     let data = handle.availableData
-                    guard !data.isEmpty else { return }
+                    guard !data.isEmpty else {
+                        handle.readabilityHandler = nil
+                        return
+                    }
                     if let s = String(data: data, encoding: .utf8), !s.isEmpty {
                         let line = s.trimmingCharacters(in: .whitespacesAndNewlines)
                         self?.writeLog("[spaas \(lvl == .stdout ? "stdout" : "stderr")] \(line)")
@@ -731,6 +794,11 @@ class TunnelManager: ObservableObject {
             do {
                 try task.run()
             } catch {
+                for pipe in [outPipe, errPipe] {
+                    pipe.fileHandleForReading.readabilityHandler = nil
+                    try? pipe.fileHandleForWriting.close()
+                }
+                task.terminationHandler = nil
                 let msg = "Failed to launch spaas login: \(error.localizedDescription)"
                 self.writeLog(msg)
                 self.appendInMemory(level: .error, msg)
@@ -744,25 +812,36 @@ class TunnelManager: ObservableObject {
     // MARK: - Shortcuts: load aliases from ~/.zshrc and run them
     func loadShortcuts() {
         dispatchPrecondition(condition: .onQueue(.main))
+        guard !isShuttingDown, !isLoadingShortcuts else { return }
+        isLoadingShortcuts = true
+        shortcutLoadError = nil
         systemQueue.async { [weak self] in
             guard let self = self else { return }
             let zshURL = self.homeDir().appendingPathComponent(".zshrc")
             var results: [Shortcut] = []
-            if FileManager.default.fileExists(atPath: zshURL.path) {
-                if let content = try? String(contentsOf: zshURL, encoding: .utf8) {
-                    let pattern = "^\\s*alias\\s+([A-Za-z0-9_+-]+)=['\"](.*?)['\"]\\s*$"
-                    if let re = try? NSRegularExpression(pattern: pattern, options: [.anchorsMatchLines]) {
-                        let ns = content as NSString
-                        let matches = re.matches(in: content, options: [], range: NSRange(location: 0, length: ns.length))
-                        for m in matches {
-                            if m.numberOfRanges >= 3 {
-                                let name = ns.substring(with: m.range(at: 1))
-                                let cmd = ns.substring(with: m.range(at: 2))
-                                results.append(Shortcut(name: name, command: cmd))
-                            }
-                        }
+            do {
+                let content = try String(contentsOf: zshURL, encoding: .utf8)
+                let pattern = "^\\s*alias\\s+([A-Za-z0-9_+-]+)=['\"](.*?)['\"]\\s*$"
+                let re = try NSRegularExpression(pattern: pattern, options: [.anchorsMatchLines])
+                let ns = content as NSString
+                let matches = re.matches(in: content, options: [], range: NSRange(location: 0, length: ns.length))
+                for m in matches {
+                    if m.numberOfRanges >= 3 {
+                        let name = ns.substring(with: m.range(at: 1))
+                        let cmd = ns.substring(with: m.range(at: 2))
+                        results.append(Shortcut(name: name, command: cmd))
                     }
                 }
+            } catch {
+                let message = "Cannot read \(zshURL.path): \(error.localizedDescription)"
+                self.writeLog(message)
+                self.appendInMemory(level: .error, message)
+                DispatchQueue.main.async {
+                    self.isLoadingShortcuts = false
+                    guard !self.isShuttingDown else { return }
+                    self.shortcutLoadError = message
+                }
+                return
             }
 
             var awsSet = Set<String>()
@@ -772,8 +851,6 @@ class TunnelManager: ObservableObject {
 
             for sc in results {
                 let cmd = sc.command
-                _ = cmd.replacingOccurrences(of: "=", with: " = ")
-
                 if cmd.contains("spaas aws") {
                     if let sys = firstMatch(in: cmd, pattern: "--system\\s+([\\S]+)") { awsSet.insert(sanitizeToken(sys)) }
                     if let e = firstMatch(in: cmd, pattern: "--env\\s+([\\S]+)") { envSet.insert(sanitizeToken(e)) }
@@ -796,6 +873,8 @@ class TunnelManager: ObservableObject {
             self.writeLog("Detected envs: \(envList.joined(separator: ", "))")
 
             DispatchQueue.main.async {
+                self.isLoadingShortcuts = false
+                guard !self.isShuttingDown else { return }
                 self.shortcuts = results
                 for s in results { if self.shortcutStates[s.name] == nil { self.shortcutStates[s.name] = .idle } }
                 self.awsSystems = awsList
@@ -825,6 +904,13 @@ class TunnelManager: ObservableObject {
         let trimSet = CharacterSet(charactersIn: "\"'()")
         t = t.trimmingCharacters(in: trimSet)
         return t
+    }
+
+    func groupStatus(kind: String, system: String, env: String) -> SpaasState {
+        let selection = GroupSelection(system: system, environment: env,
+                                       context: kind == "kubernetes" ? k8sContextBySystem[system] : nil)
+        guard groupSelections[kind] == selection else { return .idle }
+        return groupState[kind] ?? .idle
     }
 
     func runGroup(kind: String, system: String, env: String) {
@@ -882,6 +968,9 @@ class TunnelManager: ObservableObject {
             task.standardOutput = out; task.standardError = err
 
             self.groupState[key] = .running
+            self.groupSelections[key] = GroupSelection(system: system, environment: env,
+                context: key == "kubernetes" ? self.k8sContextBySystem[system] : nil)
+            self.groupLastExit[key] = nil
             self.groupLastRunAt[key] = Date()
 
             let preview = (task.arguments ?? []).joined(separator: " ")
@@ -892,7 +981,10 @@ class TunnelManager: ObservableObject {
             let capture: (FileHandle, LogLevel) -> Void = { [weak self] fh, lvl in
                 fh.readabilityHandler = { handle in
                     let data = handle.availableData
-                    guard !data.isEmpty else { return }
+                    guard !data.isEmpty else {
+                        handle.readabilityHandler = nil
+                        return
+                    }
                     if let s = String(data: data, encoding: .utf8), !s.isEmpty {
                         let line = s.trimmingCharacters(in: .whitespacesAndNewlines)
                         self?.writeLog("[group \(key) \(lvl == .stdout ? "stdout" : "stderr")] \(line)")
@@ -922,6 +1014,11 @@ class TunnelManager: ObservableObject {
                 try task.run()
                 self.groupProcesses[key] = task
             } catch {
+                for pipe in [out, err] {
+                    pipe.fileHandleForReading.readabilityHandler = nil
+                    try? pipe.fileHandleForWriting.close()
+                }
+                task.terminationHandler = nil
                 let msg = "Failed to launch group \(key): \(error.localizedDescription)"
                 self.writeLog(msg)
                 self.appendInMemory(level: .error, msg)
@@ -952,9 +1049,37 @@ class TunnelManager: ObservableObject {
 
     // Expose port status for UI (remote feature)
     func portStatus(for port: Int) -> PortStatus {
+        if stoppingPorts.contains(port) { return .checking }
         if let s = portListeningCache[port] { return s ? .listening : .notListening }
+        if (port == socksPort && socksProcess != nil) ||
+            tunnels.contains(where: { $0.localPorts.contains(port) && processes[$0.id] != nil }) {
+            return .checking
+        }
         return .unknown
     }
+
+    func tunnelStatus(for tunnel: TunnelConfig) -> PortStatus {
+        connectionStatus(on: tunnel.localPorts, hasProcess: processes[tunnel.id] != nil)
+    }
+
+    var socksStatus: PortStatus {
+        connectionStatus(on: [socksPort], hasProcess: socksProcess != nil)
+    }
+
+    private func connectionStatus(on ports: [Int], hasProcess: Bool) -> PortStatus {
+        guard !ports.isEmpty else { return .unknown }
+        if !stoppingPorts.isDisjoint(with: ports) { return .checking }
+        let states = ports.map { portStatus(for: $0) }
+        if states.allSatisfy({ $0 == .listening }) { return .listening }
+        if hasProcess { return .checking }
+        return states.contains(.notListening) ? .notListening : .unknown
+    }
+
+    func canStopTunnel(_ tunnel: TunnelConfig) -> Bool {
+        processes[tunnel.id] != nil || tunnel.localPorts.contains { portStatus(for: $0) == .listening }
+    }
+
+    var canStopSocks: Bool { socksProcess != nil || isSocksActive }
 
     // MARK: - Paths for config
     private func homeDir() -> URL { homeDirectory }
