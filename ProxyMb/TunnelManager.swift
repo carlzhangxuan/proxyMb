@@ -292,6 +292,9 @@ class TunnelManager: ObservableObject {
     deinit {
         stopStatusMonitor()
         stopLogFlushTimer()
+        // File writes capture the URL, not self, so they must finish before
+        // the manager's log directory can be safely disposed of.
+        logQueue.sync {}
     }
 
     // Start periodic monitoring to auto-detect externally-started tunnels
@@ -308,8 +311,9 @@ class TunnelManager: ObservableObject {
     }
 
     private func stopStatusMonitor() {
-        statusTimer?.setEventHandler(handler: nil)
-        statusTimer?.cancel()
+        guard let timer = statusTimer else { return }
+        timer.setEventHandler(handler: nil)
+        timer.cancel()
         statusTimer = nil
         writeLog("Stopped status monitor")
     }

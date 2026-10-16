@@ -133,6 +133,21 @@ final class ProxyMbTests: XCTestCase {
     }
 
     @MainActor
+    func testPendingLogWritesFinishBeforeManagerDisposal() async throws {
+        try Data().write(to: temporaryHome.appendingPathComponent(".zshrc"))
+        var logger: TunnelManager? = manager()
+        weak var released = logger
+        let url = try XCTUnwrap(logger).logFileURLForUI
+        logger?.loadShortcuts()
+        await drain(try XCTUnwrap(logger))
+        logger = nil
+        XCTAssertNil(released)
+        let log = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(log.contains("Loaded shortcuts: 0"))
+        XCTAssertFalse(log.contains("Stopped status monitor"), "A never-started monitor has nothing to stop")
+    }
+
+    @MainActor
     func testShortcutPartialAndCommentedLinesDoNotCreateChoices() async throws {
         let content = """
         # alias disabled='$(spaas aws configure --system ignored --env prd)'
@@ -180,16 +195,21 @@ final class ProxyMbTests: XCTestCase {
         XCTAssertGreaterThan(expected.count, 1_000_000)
         let complete = expectation(description: "Both pipes drain without deadlock")
         DispatchQueue.global().async {
+            print("Starting large-output regression with \(files.count) real file inputs")
             let stdout = TunnelManager.runCommand("/bin/cat", files.map(\.path))
+            print("Large stdout command completed: \(stdout.0.utf8.count) bytes")
             XCTAssertEqual(stdout.1, 0)
             XCTAssertEqual(Data(stdout.0.utf8), expected)
             let stderr = TunnelManager.runCommand("/bin/sh",
                 ["-c", "cat \"$@\" >&2; printf drained", "probe"] + files.map(\.path))
+            print("Large stderr command completed")
             XCTAssertEqual(stderr.1, 0)
             XCTAssertEqual(stderr.0, "drained")
             complete.fulfill()
         }
-        await fulfillment(of: [complete], timeout: 15)
+        // CI exceeded the original 15-second budget. Keep the deadlock check
+        // bounded while allowing headroom for hosted-runner I/O and scheduling.
+        await fulfillment(of: [complete], timeout: 60)
     }
 
     @MainActor
